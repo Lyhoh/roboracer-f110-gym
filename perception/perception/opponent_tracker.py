@@ -2,19 +2,15 @@ from __future__ import annotations
 import math
 import numpy as np
 from typing import Optional, List
-
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-
-# msgs (adjust package names if yours differ)
-from interfaces.msg import WpntArray, ObstacleArray, Obstacle
+from interfaces.msg import WaypointArray, ObstacleArray, Obstacle
 from visualization_msgs.msg import Marker, MarkerArray
 from nav_msgs.msg import Odometry
-
-# filter
 from filterpy.common import Q_discrete_white_noise
 from filterpy.kalman import ExtendedKalmanFilter as EKF
+from perception.frenet_converter import FrenetConverter
 
 # ---------- small helpers ----------
 
@@ -88,7 +84,7 @@ class SingleOpponentKF:
         self.ratio_to_path: float = 0.6
 
         # Path reference (for target velocity)
-        self.global_waypoints: Optional[List] = None  # expecting WpntArray.wpnts
+        self.global_waypoints: Optional[List] = None  
         self.wp_step_inv: float = 10.0  # index = int(s * wp_step_inv) like original
 
         # Simple smoothing for vs/vd outputs
@@ -175,7 +171,7 @@ class SingleOpponentKF:
             vd1
         ], dtype=float)
 
-        self.ekf.update(z=z, HJ=self.Hjac, Hx=self.hx, residual=self.residual)
+        self.ekf.update(z=z, HJacobian=self.Hjac, Hx=self.hx, residual=self.residual)
         self.ekf.x[0] = normalize_s(self.ekf.x[0], self.track_length)
 
         # small smoothing buffers
@@ -199,7 +195,7 @@ class OpponentTrackerNode(Node):
     ROS2 node:
     - Subscribes:
         * /perception/detection/raw_obstacles : ObstacleArray (detector output in Frenet)
-        * /global_waypoints                   : WpntArray     (for track length & target vx)
+        * /global_waypoints                   : WaypointsArray     (for track length & target vx)
         * /car_state/odom_frenet              : Odometry      (to know car s for relative ops; optional)
     - Publishes:
         * /perception/obstacles               : ObstacleArray (fused static+dynamic; here we mostly push the dynamic one)
@@ -258,6 +254,7 @@ class OpponentTrackerNode(Node):
         # ---- state ----
         self.track_length: Optional[float] = None
         self.global_wpnts: Optional[List]  = None
+        self.waypoints: Optional[np.ndarray] = None 
 
         # Simple target container (since single opponent)
         self.has_target = False
@@ -279,26 +276,36 @@ class OpponentTrackerNode(Node):
         self.pub_fused  = self.create_publisher(ObstacleArray, '/perception/obstacles', 10)
         self.pub_marker = self.create_publisher(MarkerArray, '/perception/static_dynamic_marker_pub', 10)
 
-        self.sub_obs = self.create_subscription(ObstacleArray, '/perception/detection/raw_obstacles',
-                                                self.cb_obstacles, qos)
-        self.sub_wp  = self.create_subscription(WpntArray, '/global_waypoints',
-                                                self.cb_waypoints, qos)
+        self.sub_obs = self.create_subscription(ObstacleArray, '/opponent_detection/raw_obstacles', self.cb_obstacles, qos)
+        self.sub_wp  = self.create_subscription(WaypointArray, '/global_waypoints', self.cb_waypoints, qos)
         # Optional (if you need car s, not required for this simple node)
-        self.sub_car = self.create_subscription(Odometry, '/car_state/odom_frenet',
-                                                self.cb_car_frenet, qos)
+        # self.sub_car = self.create_subscription(Odometry, '/car_state/odom_frenet',
+        #                                         self.cb_car_frenet, qos)
 
         # ---- timer ----
         self.timer = self.create_timer(1.0 / rate, self.on_timer)
 
+        # self.converter = self.init_frenet_converter()
+        self.converter = None
+
         self.get_logger().info('[OpponentTracker] Node started.')
 
+    # def init_frenet_converter(self):
+    #     rospy.wait_for_message("/global_waypoints", WaypointArray)
+    #     # Initialize the FrenetConverter object
+    #     converter = FrenetConverter(self.waypoints[:, 0], self.waypoints[:, 1])
+    #     self.get_logger().info("[OpponentTracker] initialized FrenetConverter object")
+    #     return converter
+
     # --------- callbacks ---------
-    def cb_waypoints(self, msg: WpntArray):
+    def cb_waypoints(self, msg):
         self.global_wpnts = msg.wpnts
+        self.waypoints = np.array([[wp.x_m, wp.y_m] for wp in msg.wpnts])
         if len(self.global_wpnts) > 0:
             self.track_length = float(self.global_wpnts[-1].s_m)
             self.tracker.set_path(self.global_wpnts, self.track_length, self.ratio_to_path)
             self.get_logger().info(f'[OpponentTracker] Received global path. Track length = {self.track_length:.2f} m')
+        self.converter = FrenetConverter(self.waypoints[:, 0], self.waypoints[:, 1])
 
     def cb_car_frenet(self, msg: Odometry):
         # Not strictly used here, but kept for extension
@@ -406,9 +413,7 @@ class OpponentTrackerNode(Node):
         # Replace this with your Frenet->Cartesian converter.
         s = float(self.tracker.ekf.x[0])
         d = float(self.tracker.ekf.x[2])
-        # >>>>> Replace with converter.get_cartesian(s, d)
-        m.pose.position.x = s  # placeholder
-        m.pose.position.y = d  # placeholder
+        m.pose.position.x, m.pose.position.y = self.converter.get_cartesian(s, d)
         m.pose.orientation.w = 1.0
 
         ma.markers.append(m)

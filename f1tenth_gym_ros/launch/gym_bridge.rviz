@@ -67,8 +67,8 @@ Visualization Manager:
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
-        Max Value: 1.5292147397994995
-        Min Value: -0.1876402646303177
+        Max Value: 1.5321836471557617
+        Min Value: -0.1846713274717331
         Value: true
       Axis: X
       Channel Name: intensity
@@ -250,6 +250,18 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /opponent_detection/breakpoints
       Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: MarkerArray
+      Namespaces:
+        "": true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /perception/static_dynamic_marker_pub
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -330,5 +342,5 @@ Window Geometry:
   Views:
     collapsed: false
   Width: 1600
-  X: 340
-  Y: 429
+  X: 70
+  Y: 224
