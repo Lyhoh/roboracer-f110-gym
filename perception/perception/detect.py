@@ -5,7 +5,7 @@ from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Point
 from visualization_msgs.msg import Marker, MarkerArray
-from interfaces.msg import WaypointArray
+from interfaces.msg import WaypointArray, ObstacleArray, Obstacle as ObstacleMessage
 import math
 from bisect import bisect_left
 import csv
@@ -14,7 +14,6 @@ from tf_transformations import quaternion_matrix, quaternion_from_euler
 from tf2_ros import Buffer, TransformListener, LookupException, ConnectivityException, ExtrapolationException
 from rclpy.duration import Duration
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from message_filters import ApproximateTimeSynchronizer, Subscriber
 from scipy.spatial.transform import Rotation as R
 from rclpy.time import Time
 
@@ -51,7 +50,7 @@ class Detect(Node):
         self.declare_parameter('sigma', 0.01)  # standard deviation for adaptive clustering
         self.declare_parameter('min_obs_size', 5)
         self.declare_parameter('min_2_points_dist', 0.1)  # minimum distance between two points to be considered an obstacle
-        self.declare_parameter('max_obs_size', 5.0)   # 10
+        self.declare_parameter('max_obs_size', 0.8)   # 10
 
         # Load parameters
         self.tf_buffer = Buffer(cache_time=Duration(seconds=10.0))
@@ -71,6 +70,7 @@ class Detect(Node):
         self.pub_markers = self.create_publisher(MarkerArray, '/opponent_detection/markers', 10)   
         self.pub_boundaries = self.create_publisher(Marker, '/opponent_detection/boundaries', 10)
         self.pub_breakpoints_markers = self.create_publisher(MarkerArray, '/opponent_detection/breakpoints', 10)
+        self.pub_obstacles_message = self.create_publisher(ObstacleArray, '/opponent_detection/raw_obstacles', 10)
         # self.pub_debug = self.create_publisher(MarkerArray, '/opponent_detection/track_debug', 10)
         # self.pub_object = self.create_publisher(MarkerArray, '/opponent_detection/object_markers', 10)
 
@@ -99,7 +99,9 @@ class Detect(Node):
         self.smallest_d = 0.0
         self.biggest_d = 0.0
         self.path_needs_update = False
-        self.boundary_inflation = 0.1  
+        self.boundary_inflation = 0.3  # 0.1
+        self.H_map_bl = None
+        self.t_map_bl = None  # rclpy.time.Time of the cached transform
 
         self.scan = None
         self.tracked_obstacles = []
@@ -136,6 +138,16 @@ class Detect(Node):
             d = float(d_arr[0])
             self.car_s = s
 
+        H_odom_bl = quaternion_matrix([q.x, q.y, q.z, q.w])
+        H_odom_bl[0,3] = x
+        H_odom_bl[1,3] = y
+        H_odom_bl[2,3] = self.car_pose.position.z
+
+        H_map_odom = np.eye(4, dtype=np.float64)
+
+        self.H_map_bl = H_map_odom @ H_odom_bl
+        self.t_map_bl = Time.from_msg(self.current_stamp)  # odom.header.stamp
+        
         self.detect()
 
     def path_callback(self, path):
@@ -339,7 +351,6 @@ class Detect(Node):
         pts_bl = self._transform_xy(pts_l, H_bl_l)
         return pts_bl
 
-
     def adaptive_breakpoint_clustering(self, points, d_phi):
         """Adaptive Breakpoint clustering (Amin et al., 2022)."""
         clusters = [[points[0]]]
@@ -350,13 +361,18 @@ class Detect(Node):
                 clusters.append([points[i]])
             else:
                 clusters[-1].append(points[i])
-        return [np.array(c) for c in clusters]
+        clusters = [np.array(c) for c in clusters if len(c) >= self.min_points_per_cluster]
+        # [np.array(c) for c in clusters]
+        return clusters
     
     def is_track_boundary(self, s, d):
         """Check if the point (s, d) is on the track boundary."""
-        if normalize_s(s - self.car_s, self.track_length) > self.max_viewing_distance:
-            # print("s out of range")
+        ds = normalize_s(s - self.car_s, self.track_length)
+        if ds < -2 or ds > self.max_viewing_distance:
             return True
+        # if normalize_s(s - self.car_s, self.track_length) > self.max_viewing_distance:
+        #     # print("s out of range")
+        #     return True
         idx = bisect_left(self.s_array, s)
         if idx:
             idx -= 1
@@ -452,6 +468,36 @@ class Detect(Node):
             current_obstacle_array.append(Obstacle(center[0], center[1], np.linalg.norm(colVec), theta_opt))
 
         return current_obstacle_array
+    
+    def publish_obstacles_message(self):
+        obstacles_array_message = ObstacleArray()
+        obstacles_array_message.header.stamp = self.current_stamp
+        obstacles_array_message.header.frame_id = "map"   # map ?
+
+        x_center = []
+        y_center = []
+        for obstacle in self.tracked_obstacles:
+            x_center.append(obstacle.center_x)
+            y_center.append(obstacle.center_y)
+
+        s_points, d_points = self.converter.get_frenet(np.array(x_center), np.array(y_center))
+
+        for idx, obstacle in enumerate(self.tracked_obstacles):
+            s = s_points[idx]
+            d = d_points[idx]
+
+            obsMsg = ObstacleMessage()
+            obsMsg.id = obstacle.id
+            obsMsg.s_start = s-obstacle.size/2
+            obsMsg.s_end = s+obstacle.size/2
+            obsMsg.d_left = d+obstacle.size/2
+            obsMsg.d_right = d-obstacle.size/2
+            obsMsg.s_center = s
+            obsMsg.d_center = d
+            obsMsg.size = obstacle.size
+
+            obstacles_array_message.obstacles.append(obsMsg)
+        self.pub_obstacles_message.publish(obstacles_array_message)
 
     def publish_markers(self):
         arr = MarkerArray()
@@ -609,13 +655,23 @@ class Detect(Node):
         mids_map = []   # store (x,y) in map for later visualization if desired
         mids_sd   = []  # store (s,d) for later publishing
 
-        # TF: map <- base_link at scan_t (strict time alignment)
-        tf_map_from_bl = self._lookup_tf_exact_or_backoff("map", "ego_racecar/base_link", scan_t)
-        if tf_map_from_bl is None:
-            self.get_logger().warn('returning from tf_map_from_bl is None')
-            return
-        self.get_logger().info('tf_map_from_bl is found')
-        H_map_bl = self._H_from_tf(tf_map_from_bl)
+        MAX_STALENESS_NS = int(0.12 * 1e9)
+
+        use_cached = (self.H_map_bl is not None and self.t_map_bl is not None
+                      and abs(scan_t.nanoseconds - self.t_map_bl.nanoseconds) <= MAX_STALENESS_NS) 
+        if use_cached:
+            H_map_bl = self.H_map_bl
+            yaw_map_from_bl = self._quat_to_yaw(self.car_pose.orientation)
+        else:
+            # TF: map <- base_link
+            tf_map_from_bl = self._lookup_tf_exact_or_backoff("map", "ego_racecar/base_link", scan_t,
+                                                              future_backoff_sec=0.1, timeout_sec=0.08)
+            if tf_map_from_bl is None:
+                self.get_logger().warn('returning from tf_map_from_bl is None')
+                return
+            self.get_logger().info('tf_map_from_bl is found')
+            H_map_bl = self._H_from_tf(tf_map_from_bl)
+            yaw_map_from_bl = self._quat_to_yaw(tf_map_from_bl.transform.rotation)
 
         for c in clusters:
             if c.shape[0] < self.min_obs_size:
@@ -629,9 +685,8 @@ class Detect(Node):
             )
             s, d = float(s_arr[0]), float(d_arr[0])
 
-            # Your boundary logic (Frenet-based). If it returns True = boundary -> skip.
-            # if self.is_track_boundary(s, d):
-            #     continue
+            if self.is_track_boundary(s, d):
+                continue
 
             kept_clusters_bl.append(c)
             mids_map.append((mid_map[0], mid_map[1]))
@@ -641,7 +696,7 @@ class Detect(Node):
         rects_bl = self.fit_rectangle(kept_clusters_bl)
 
         # --- 5) Transform rectangle centers/yaws to map at the same scan_t and publish ---
-        yaw_map_from_bl = self._quat_to_yaw(tf_map_from_bl.transform.rotation)
+        # yaw_map_from_bl = self._quat_to_yaw(tf_map_from_bl.transform.rotation)
         current_obstacles = []
         for r in rects_bl:
             if r.size > self.max_obs_size:
@@ -655,10 +710,11 @@ class Detect(Node):
         for i, ob in enumerate(current_obstacles):
             ob.id = i
             self.tracked_obstacles.append(ob)
-
+        # self.publish_track_boundaries()
         self.publish_markers()
         # Optional debug of midpoints:
         self.publish_obstacles(mids_map, mids_sd)
+        self.publish_obstacles_message()
 
 
 def main(args=None):
