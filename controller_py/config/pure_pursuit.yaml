@@ -52,5 +52,5 @@
     v_ramp_rate_opp:    2.0
 
     # Option B: constant targets if not using path vx (set use_path_speed_* = false)
-    v_target_ego: 0.0  # 3.5, 2.0
-    v_target_opp: 1.0  # 3.0, 2.0
+    v_target_ego: 1.0  # 3.5, 2.0, 1.0
+    v_target_opp: 1.0  # 3.0, 2.0, 1.0

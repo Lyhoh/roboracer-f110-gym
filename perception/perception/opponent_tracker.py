@@ -11,6 +11,10 @@ from nav_msgs.msg import Odometry
 from filterpy.common import Q_discrete_white_noise
 from filterpy.kalman import ExtendedKalmanFilter as EKF
 from perception.frenet_converter import FrenetConverter
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy   
+import numpy.linalg as npl 
+import csv, os
+
 
 # ---------- small helpers ----------
 
@@ -42,28 +46,31 @@ class SingleOpponentKF:
                  q_vs: float, q_vd: float,
                  r_s: float, r_vs: float, r_d: float, r_vd: float,
                  P0_diag = (0.5, 1.0, 0.2, 0.5)):
-        self.rate = max(1.0, float(rate_hz))
-        self.dt = 1.0 / self.rate
 
         # EKF
         self.ekf = EKF(dim_x=4, dim_z=4)  # IMPORTANT: dim_z = 4
         self.ekf.x = np.zeros(4)  # [s, vs, d, vd]
 
-        # State transition (linear CV)
-        self.ekf.F = np.array([
-            [1.0, self.dt, 0.0,     0.0],
-            [0.0, 1.0,     0.0,     0.0],
-            [0.0, 0.0,     1.0,     self.dt],
-            [0.0, 0.0,     0.0,     1.0]
-        ], dtype=float)
+        self.q_vs = float(q_vs)
+        self.q_vd = float(q_vd)
+        self.rate = max(1.0, float(rate_hz))
+        self.dt = self._set_dt(1.0 / self.rate)
 
-        # Process noise (block diag for s-chain and d-chain)
-        q1 = Q_discrete_white_noise(dim=2, dt=self.dt, var=max(1e-6, q_vs))
-        q2 = Q_discrete_white_noise(dim=2, dt=self.dt, var=max(1e-6, q_vd))
-        self.ekf.Q = np.block([
-            [q1,              np.zeros((2,2))],
-            [np.zeros((2,2)), q2]
-        ])
+        # # State transition (linear CV)
+        # self.ekf.F = np.array([
+        #     [1.0, self.dt, 0.0,     0.0],
+        #     [0.0, 1.0,     0.0,     0.0],
+        #     [0.0, 0.0,     1.0,     self.dt],
+        #     [0.0, 0.0,     0.0,     1.0]
+        # ], dtype=float)
+
+        # # Process noise (block diag for s-chain and d-chain)
+        # q1 = Q_discrete_white_noise(dim=2, dt=self.dt, var=max(1e-6, q_vs))
+        # q2 = Q_discrete_white_noise(dim=2, dt=self.dt, var=max(1e-6, q_vd))
+        # self.ekf.Q = np.block([
+        #     [q1,              np.zeros((2,2))],
+        #     [np.zeros((2,2)), q2]
+        # ])
 
         # Measurement model: direct observe [s, vs, d, vd]
         self.ekf.H = np.eye(4)
@@ -80,7 +87,7 @@ class SingleOpponentKF:
 
         # Track properties
         self.track_length: Optional[float] = None
-        self.use_target_vel: bool = False
+        self.use_target_vel: bool = True   # False
         self.ratio_to_path: float = 0.6
 
         # Path reference (for target velocity)
@@ -110,6 +117,18 @@ class SingleOpponentKF:
         return y
 
     # ---- utilities ----
+    def _set_dt(self, dt: float):
+        self.dt = float(np.clip(dt, 1e-4, 0.5)) 
+        self.ekf.F = np.array([
+            [1.0, self.dt, 0.0,     0.0],
+            [0.0, 1.0,     0.0,     0.0],
+            [0.0, 0.0,     1.0,     self.dt],
+            [0.0, 0.0,     0.0,     1.0]
+        ], dtype=float)
+        q1 = Q_discrete_white_noise(dim=2, dt=self.dt, var=max(1e-6, self.q_vs))
+        q2 = Q_discrete_white_noise(dim=2, dt=self.dt, var=max(1e-6, self.q_vd))
+        self.ekf.Q = np.block([[q1, np.zeros((2,2))],[np.zeros((2,2)), q2]])
+
     def set_soft_pulls(self, P_vs: float, P_d: float, P_vd: float):
         self.P_vs = max(0.0, float(P_vs))
         self.P_d  = max(0.0, float(P_d))
@@ -130,46 +149,54 @@ class SingleOpponentKF:
         return float(self.ratio_to_path * vx)
 
     # ---- main steps ----
-    def initialize_from_two(self, s2: float, s1: float, d2: float, d1: float):
+    def initialize_from_two(self, s2: float, s1: float, d2: float, d1: float, dt: float):
         """Initialize state using two consecutive detections."""
-        vs = (wrap_s_residual(s2 - s1, self.track_length) * self.rate)
-        vd = (d2 - d1) * self.rate
+        dt = float(np.clip(dt, 1e-4, 0.5))
+        # vs = (wrap_s_residual(s2 - s1, self.track_length) * self.rate)
+        # vd = (d2 - d1) * self.rate
+        vs = wrap_s_residual(s2 - s1, self.track_length) / dt
+        vd = (d2 - d1) / dt
+        vs = float(np.clip(vs, -5.0, 5.0))  # -5.0 ~ 5.0
+        vd = float(np.clip(vd, -3.0, 3.0))
         x0 = np.array([normalize_s(s2, self.track_length), vs, d2, vd], dtype=float)
         self.ekf.x = x0
 
-    def predict(self):
+    def predict(self, dt: Optional[float] = None):
         """EKF prediction with optional soft pull control."""
+        if dt is not None:
+            self._set_dt(dt)
         s, vs, d, vd = self.ekf.x
         if self.use_target_vel:
             v_tgt = self._v_target_from_path(s)
             # Control vector u = [0, P_vs*(v_tgt - vs), -P_d*d, -P_vd*vd]
             u = np.array([0.0, self.P_vs * (v_tgt - vs), -self.P_d * d, -self.P_vd * vd], dtype=float)
         else:
-            u = np.array([0.0, 0.0, -self.P_d * d, -self.P_vd * vd], dtype=float)
+            # when blind, softly damp longitudinal speed to 0
+            k_damp = 0.2   # 0.1~0.3
+            u = np.array([0.0, -k_damp * vs, -self.P_d * d, -self.P_vd * vd], dtype=float)
 
         # We model control as B = I (soft pulls directly add on state delta)
         self.ekf.B = np.eye(4)
         self.ekf.predict(u=u)
+        # self.ekf.predict()
 
         # Keep s on the ring
         self.ekf.x[0] = normalize_s(self.ekf.x[0], self.track_length)
 
-    def update(self, s_meas: float, d_meas: float,
-               s_prev: Optional[float], d_prev: Optional[float]):
+    def update(self, s_meas: float, d_meas: float, s_prev: Optional[float], d_prev: Optional[float], dt: float):
         """Build 4D measurement using current and (optionally) previous point to estimate vs, vd."""
+        dt = float(np.clip(dt, 1e-4, 0.5))
         # estimate instantaneous velocities (weighted two-tap)
-        if s_prev is not None:
-            vs1 = wrap_s_residual(s_meas - s_prev, self.track_length) * self.rate
-        else:
-            vs1 = 0.0
-        vd1 = (d_meas - (d_prev if d_prev is not None else d_meas)) * self.rate
+        # if s_prev is not None:
+        #     vs1 = wrap_s_residual(s_meas - s_prev, self.track_length) * self.rate
+        # else:
+        #     vs1 = 0.0
+        # vd1 = (d_meas - (d_prev if d_prev is not None else d_meas)) * self.rate
 
-        z = np.array([
-            normalize_s(s_meas, self.track_length),
-            vs1,
-            d_meas,
-            vd1
-        ], dtype=float)
+        vs1 = wrap_s_residual(s_meas - (s_prev if s_prev is not None else s_meas), self.track_length) / dt
+        vd1 = (d_meas - (d_prev if d_prev is not None else d_meas)) / dt
+
+        z = np.array([normalize_s(s_meas, self.track_length), vs1, d_meas, vd1], dtype=float)
 
         self.ekf.update(z=z, HJacobian=self.Hjac, Hx=self.hx, residual=self.residual)
         self.ekf.x[0] = normalize_s(self.ekf.x[0], self.track_length)
@@ -183,6 +210,7 @@ class SingleOpponentKF:
 
     def get_smoothed_vs(self) -> float:
         return float(np.mean(self.vs_hist)) if self.vs_hist else float(self.ekf.x[1])
+        # return float(self.ekf.x[1])
 
     def get_smoothed_vd(self) -> float:
         return float(np.mean(self.vd_hist)) if self.vd_hist else float(self.ekf.x[3])
@@ -191,16 +219,6 @@ class SingleOpponentKF:
 # ---------- ROS2 node ----------
 
 class OpponentTrackerNode(Node):
-    """
-    ROS2 node:
-    - Subscribes:
-        * /perception/detection/raw_obstacles : ObstacleArray (detector output in Frenet)
-        * /global_waypoints                   : WaypointsArray     (for track length & target vx)
-        * /car_state/odom_frenet              : Odometry      (to know car s for relative ops; optional)
-    - Publishes:
-        * /perception/obstacles               : ObstacleArray (fused static+dynamic; here we mostly push the dynamic one)
-        * /perception/static_dynamic_marker_pub : MarkerArray (RViz markers)
-    """
     def __init__(self):
         super().__init__('opponent_tracker')
 
@@ -214,17 +232,20 @@ class OpponentTrackerNode(Node):
         self.declare_parameter('process_var_vd', 0.3)   # Q for vd chain
 
         self.declare_parameter('meas_var_s',  0.05)     # R diag
-        self.declare_parameter('meas_var_vs', 0.8)
+        self.declare_parameter('meas_var_vs', 0.8)  # 0.8
         self.declare_parameter('meas_var_d',  0.05)
-        self.declare_parameter('meas_var_vd', 0.8)
+        self.declare_parameter('meas_var_vd', 0.8)  # 0.8
 
         self.declare_parameter('ratio_to_path', 0.6)
-        self.declare_parameter('use_target_vel_when_lost', True)
+        self.declare_parameter('use_target_vel_when_lost', False)    # True
 
         self.declare_parameter('assoc_max_dist_s', 6.0) # gating in Frenet
         self.declare_parameter('assoc_max_dist_d', 1.0)
         self.declare_parameter('ttl_frames', 40)
         self.declare_parameter('var_pub_max', 0.5)      # publish when P[0,0] < var_pub_max
+
+        self.declare_parameter('smooth_len', 5) 
+        self.declare_parameter('mahalanobis_gate', 9.0) 
 
         # ---- read parameters ----
         rate = float(self.get_parameter('rate').value)
@@ -244,12 +265,16 @@ class OpponentTrackerNode(Node):
 
         self.assoc_max_s = float(self.get_parameter('assoc_max_dist_s').value)
         self.assoc_max_d = float(self.get_parameter('assoc_max_dist_d').value)
-        self.ttl_init    = int(self.get_parameter('ttl_frames').value)
+        self.ttl_init = int(self.get_parameter('ttl_frames').value)
         self.var_pub_max = float(self.get_parameter('var_pub_max').value)
+
+        smooth_len  = int(self.get_parameter('smooth_len').value)
+        self.mah_gate = float(self.get_parameter('mahalanobis_gate').value)
 
         # ---- tracker ----
         self.tracker = SingleOpponentKF(rate, q_vs, q_vd, r_s, r_vs, r_d, r_vd)
         self.tracker.set_soft_pulls(P_vs, P_d, P_vd)
+        self.tracker.smooth_len = max(1, smooth_len)
 
         # ---- state ----
         self.track_length: Optional[float] = None
@@ -260,10 +285,14 @@ class OpponentTrackerNode(Node):
         self.has_target = False
         self.target_id = 1
         self.ttl = 0
+        self.updated_this_cycle = False
 
         # Keep last measurement to estimate vs/vd
         self.prev_s: Optional[float] = None
         self.prev_d: Optional[float] = None
+
+        self.prev_meas_t = None
+        self.last_pred_t = None
 
         # ---- QoS ----
         qos = QoSProfile(
@@ -271,13 +300,19 @@ class OpponentTrackerNode(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=10
         )
+        qos_wp = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,   
+        )
 
         # ---- pubs/subs ----
         self.pub_fused  = self.create_publisher(ObstacleArray, '/perception/obstacles', 10)
         self.pub_marker = self.create_publisher(MarkerArray, '/perception/static_dynamic_marker_pub', 10)
 
         self.sub_obs = self.create_subscription(ObstacleArray, '/opponent_detection/raw_obstacles', self.cb_obstacles, qos)
-        self.sub_wp  = self.create_subscription(WaypointArray, '/global_waypoints', self.cb_waypoints, qos)
+        self.sub_wp  = self.create_subscription(WaypointArray, '/global_waypoints', self.cb_waypoints, qos_wp)
         # Optional (if you need car s, not required for this simple node)
         # self.sub_car = self.create_subscription(Odometry, '/car_state/odom_frenet',
         #                                         self.cb_car_frenet, qos)
@@ -287,6 +322,13 @@ class OpponentTrackerNode(Node):
 
         # self.converter = self.init_frenet_converter()
         self.converter = None
+
+        # # self.log_csv_path = os.path.join(os.getcwd(), 'obstacles_ekf.csv')
+        # self.log_csv_path = '/home/lyh/ros2_ws/src/f110_gym/perception/results/obstacles_ekf.csv'
+        # self.log_csv_file = open(self.log_csv_path, 'w', newline='')
+        # self.log_csv = csv.writer(self.log_csv_file)
+        # self.log_csv.writerow(['t','s','d','vs','vd','s_var','vs_var','d_var','vd_var','visible'])
+        # self.get_logger().info(f'[EKF] CSV logging to {self.log_csv_path}')
 
         self.get_logger().info('[OpponentTracker] Node started.')
 
@@ -303,6 +345,7 @@ class OpponentTrackerNode(Node):
         self.waypoints = np.array([[wp.x_m, wp.y_m] for wp in msg.wpnts])
         if len(self.global_wpnts) > 0:
             self.track_length = float(self.global_wpnts[-1].s_m)
+            self.get_logger().info(f'Track length = {self.track_length:.2f} m')
             self.tracker.set_path(self.global_wpnts, self.track_length, self.ratio_to_path)
             self.get_logger().info(f'[OpponentTracker] Received global path. Track length = {self.track_length:.2f} m')
         self.converter = FrenetConverter(self.waypoints[:, 0], self.waypoints[:, 1])
@@ -346,30 +389,50 @@ class OpponentTrackerNode(Node):
         s_meas = float(best.s_center)
         d_meas = float(best.d_center)
 
+        t_meas = rclpy.time.Time.from_msg(msg.header.stamp)
+        if self.prev_meas_t is None:
+            self.prev_meas_t = t_meas
+            self.prev_s, self.prev_d = s_meas, d_meas
+            return
+        dt_meas = (t_meas - self.prev_meas_t).nanoseconds * 1e-9
+        dt_meas = max(1e-4, min(dt_meas, 0.5)) 
+
         if not self.has_target:
             # Need at least two hits to initialize with a velocity
             if self.prev_s is None:
                 self.prev_s, self.prev_d = s_meas, d_meas
                 return
             # Initialize EKF
-            self.tracker.initialize_from_two(s_meas, self.prev_s, d_meas, self.prev_d)
+            self.tracker.initialize_from_two(s_meas, self.prev_s, d_meas, self.prev_d, dt_meas)
             self.has_target = True
             self.ttl = self.ttl_init
             self.prev_s, self.prev_d = s_meas, d_meas
+            self.prev_meas_t = t_meas
+            self.updated_this_cycle = True
             return
 
         # Normal EKF update path
-        self.tracker.update(s_meas, d_meas, self.prev_s, self.prev_d)
+        self.tracker.update(s_meas, d_meas, self.prev_s, self.prev_d, dt_meas)
         self.prev_s, self.prev_d = s_meas, d_meas
+        self.prev_meas_t = t_meas
         self.ttl = self.ttl_init  # refresh TTL when seen
+        self.updated_this_cycle = True
 
     # --------- main loop ---------
     def on_timer(self):
         if self.track_length is None or self.track_length <= 0:
             return
+        
+        t_now = self.get_clock().now()
+        if self.last_pred_t is None:
+            self.last_pred_t = t_now
+            return
+        dt_pred = (t_now - self.last_pred_t).nanoseconds * 1e-9
+        dt_pred = max(1e-4, min(dt_pred, 0.5))
+        self.last_pred_t = t_now
 
         if self.has_target:
-            self.tracker.predict()
+            self.tracker.predict(dt=dt_pred)
             self.ttl -= 1
             if self.ttl <= 0:
                 # Lost target
@@ -380,11 +443,48 @@ class OpponentTrackerNode(Node):
                 self.tracker.use_target_vel = bool(self.use_target_when_lost)
         else:
             # idle: still predict softly to keep d stabilized if desired
-            self.tracker.predict()
+            self.tracker.predict(dt=dt_pred)
 
         # Publish outputs
         self.publish_marker()
         self.publish_obstacle()
+        self.updated_this_cycle = False
+
+    def mahalanobis_d2_sd(self, s_obs: float, d_obs: float) -> float:
+        """
+        Compute Mahalanobis distance squared for measurement z=[s,d] against
+        the predicted measurement from the current EKF state.
+        """
+        if self.track_length is None:
+            return float('inf')
+
+        # Predicted measurement using a selector H_sub for [s,d]
+        x = self.tracker.ekf.x
+        H_sub = np.array([[1., 0., 0., 0.],
+                        [0., 0., 1., 0.]], dtype=float)
+        z_pred = H_sub @ x
+        z_pred[0] = normalize_s(z_pred[0], self.track_length)
+
+        # Observed measurement with s wrapped to the track ring
+        z_meas = np.array([normalize_s(s_obs, self.track_length), float(d_obs)], dtype=float)
+
+        # Residual with ring-aware s
+        y = z_meas - z_pred
+        y[0] = wrap_s_residual(y[0], self.track_length)
+
+        # Innovation covariance S = H P H^T + R_sub (use r_s and r_d)
+        P = self.tracker.ekf.P
+        R_sub = np.diag([self.tracker.R[0, 0], self.tracker.R[2, 2]])
+        S = H_sub @ P @ H_sub.T + R_sub
+
+        try:
+            S_inv = npl.inv(S)
+        except npl.LinAlgError:
+            return float('inf')
+
+        d2 = float(y.T @ S_inv @ y)
+        return d2
+
 
     # --------- publishers ---------
     def publish_marker(self):
@@ -395,6 +495,10 @@ class OpponentTrackerNode(Node):
         clr.action = Marker.DELETEALL
         ma.markers.append(clr)
 
+        if not self.has_target:
+            self.pub_marker.publish(ma)
+            return
+
         m = Marker()
         m.header.frame_id = 'map'  # adjust to your world frame
         m.header.stamp = self.get_clock().now().to_msg()
@@ -404,9 +508,9 @@ class OpponentTrackerNode(Node):
         m.scale.y = 0.5
         m.scale.z = 0.5
         m.color.a = 0.8
-        m.color.r = 1.0 if self.has_target else 1.0
-        m.color.g = 0.0 if self.has_target else 0.3
-        m.color.b = 0.0 if self.has_target else 0.8
+        m.color.r = 1.0 # if self.has_target else 1.0
+        m.color.g = 0.0 # if self.has_target else 0.3
+        m.color.b = 0.0 # if self.has_target else 0.8
 
         # Convert Frenet (s,d) to map (x,y) only if you have a converter.
         # Here we just place a sphere along s on x-axis as a placeholder.
@@ -420,6 +524,8 @@ class OpponentTrackerNode(Node):
         self.pub_marker.publish(ma)
 
     def publish_obstacle(self):
+        if not self.updated_this_cycle:
+            return
         # Only publish if covariance on s is reasonably bounded
         if self.tracker.ekf.P[0, 0] > self.var_pub_max:
             return
@@ -450,6 +556,7 @@ class OpponentTrackerNode(Node):
         # velocities (smoothed)
         o.vs = self.tracker.get_smoothed_vs()
         o.vd = self.tracker.get_smoothed_vd()
+        # o.vs, o.vd = self.converter.get_cartesian(o.vs, o.vd)
 
         # variances
         o.s_var  = float(self.tracker.ekf.P[0, 0])
@@ -460,6 +567,12 @@ class OpponentTrackerNode(Node):
         oa.obstacles = [o]
         self.pub_fused.publish(oa)
 
+        ts = oa.header.stamp.sec + oa.header.stamp.nanosec * 1e-9
+        # self.log_csv.writerow([f'{ts:.9f}', o.s_center, o.d_center, o.vs, o.vd,
+        #                     o.s_var, o.vs_var, o.d_var, o.vd_var, int(o.is_visible)])
+        # self.log_csv_file.flush()
+        # self.get_logger().info(f's={o.s_center:.2f} d={o.d_center:.2f} vs={o.vs:.2f} vd={o.vd:.2f}')
+
 
 def main():
     rclpy.init()
@@ -468,6 +581,15 @@ def main():
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
+
+    # finally:
+    #     try:
+    #         if hasattr(node, "log_csv_file") and not node.log_csv_file.closed:
+    #             node.get_logger().info(f"[OpponentTracker] Closing CSV log file.")
+    #             node.log_csv_file.close()
+    #     except Exception as e:
+    #         node.get_logger().warn(f"Error while closing CSV file: {e}")
+    
     node.destroy_node()
     rclpy.shutdown()
 

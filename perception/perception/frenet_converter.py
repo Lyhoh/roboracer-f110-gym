@@ -166,3 +166,28 @@ class FrenetConverter:
         y += d * np.sin(psi + np.pi / 2)
         
         return np.array([x, y])
+    
+
+import csv
+
+csv_path = "/home/lyh/ros2_ws/src/f110_gym/perception/waypoints/map5/global_waypoints.csv"
+with open(csv_path, "r") as f:
+    reader = csv.reader(f)
+    header = [h.strip() for h in next(reader)]
+    cols = {h: i for i, h in enumerate(header)}
+    rows = list(reader)     
+
+xs, ys, ss, dl, dr = [], [], [], [], []
+for row in rows:
+    xs.append(float(row[cols["x_m"]]))
+    ys.append(float(row[cols["y_m"]]))
+waypoints = np.column_stack([xs, ys]).astype(np.float64)
+converter = FrenetConverter(waypoints[:, 0], waypoints[:, 1])
+
+x_center, y_center = [0.949898, 0.421105], [-1.22579, 0.341313]
+s_points, d_points = converter.get_frenet(np.array(x_center), np.array(y_center))
+print(f"s_points: {s_points}")
+print(f"d_points: {d_points}")
+
+# s_points: [23.15966088 24.73931542]
+# d_points: [-0.33018135  0.248895  ]

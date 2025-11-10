@@ -13,7 +13,8 @@ from perception.frenet_converter import FrenetConverter
 from tf_transformations import quaternion_matrix, quaternion_from_euler
 from tf2_ros import Buffer, TransformListener, LookupException, ConnectivityException, ExtrapolationException
 from rclpy.duration import Duration
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, QoSDurabilityPolicy
+from builtin_interfaces.msg import Duration as DurationMsg
 from scipy.spatial.transform import Rotation as R
 from rclpy.time import Time
 
@@ -66,6 +67,13 @@ class Detect(Node):
 
         self.csv_path = '/home/lyh/ros2_ws/src/f110_gym/perception/waypoints/map5/global_waypoints.csv'
 
+        # marker_qos = QoSProfile(
+        #     reliability=ReliabilityPolicy.RELIABLE,
+        #     durability=QoSDurabilityPolicy.VOLATILE,
+        #     # history=HistoryPolicy.KEEP_LAST,
+        #     depth=10
+        # )
+
         # Publishers
         self.pub_markers = self.create_publisher(MarkerArray, '/opponent_detection/markers', 10)   
         self.pub_boundaries = self.create_publisher(Marker, '/opponent_detection/boundaries', 10)
@@ -99,9 +107,11 @@ class Detect(Node):
         self.smallest_d = 0.0
         self.biggest_d = 0.0
         self.path_needs_update = False
-        self.boundary_inflation = 0.3  # 0.1
+        self.boundary_inflation = 0.2  # 0.1, 0.3
         self.H_map_bl = None
         self.t_map_bl = None  # rclpy.time.Time of the cached transform
+        self.prev_ids = set()
+        self.prev_ids_obs = set()
 
         self.scan = None
         self.tracked_obstacles = []
@@ -112,7 +122,7 @@ class Detect(Node):
 
     def laser_callback(self, scan):
         self.scan = scan
-        # self.detect()
+        self.detect()
 
     def odom_callback(self, odom):
         '''Get car pose and convert to Frenet coordinates.'''
@@ -148,7 +158,7 @@ class Detect(Node):
         self.H_map_bl = H_map_odom @ H_odom_bl
         self.t_map_bl = Time.from_msg(self.current_stamp)  # odom.header.stamp
         
-        self.detect()
+        # self.detect()
 
     def path_callback(self, path):
         """Initialize track arrays from global waypoints.
@@ -314,9 +324,11 @@ class Detect(Node):
                 )
                 return None
 
-    def clearmarkers(self) -> MarkerArray:
+    def clearmarkers(self):
         # Create a DELETEALL marker
         m = Marker()
+        m.header.frame_id = "map"
+        m.header.stamp = self.get_clock().now().to_msg()
         m.action = Marker.DELETEALL # Clear all markers
         arr = MarkerArray()
         arr.markers.append(m)
@@ -368,7 +380,7 @@ class Detect(Node):
     def is_track_boundary(self, s, d):
         """Check if the point (s, d) is on the track boundary."""
         ds = normalize_s(s - self.car_s, self.track_length)
-        if ds < -2 or ds > self.max_viewing_distance:
+        if ds < 0 or ds > self.max_viewing_distance:
             return True
         # if normalize_s(s - self.car_s, self.track_length) > self.max_viewing_distance:
         #     # print("s out of range")
@@ -472,7 +484,7 @@ class Detect(Node):
     def publish_obstacles_message(self):
         obstacles_array_message = ObstacleArray()
         obstacles_array_message.header.stamp = self.current_stamp
-        obstacles_array_message.header.frame_id = "map"   # map ?
+        obstacles_array_message.header.frame_id = "map"  
 
         x_center = []
         y_center = []
@@ -488,10 +500,10 @@ class Detect(Node):
 
             obsMsg = ObstacleMessage()
             obsMsg.id = obstacle.id
-            obsMsg.s_start = s-obstacle.size/2
-            obsMsg.s_end = s+obstacle.size/2
-            obsMsg.d_left = d+obstacle.size/2
-            obsMsg.d_right = d-obstacle.size/2
+            obsMsg.s_start = s - obstacle.size/2
+            obsMsg.s_end = s + obstacle.size/2
+            obsMsg.d_left = d + obstacle.size/2
+            obsMsg.d_right = d - obstacle.size/2
             obsMsg.s_center = s
             obsMsg.d_center = d
             obsMsg.size = obstacle.size
@@ -501,13 +513,15 @@ class Detect(Node):
 
     def publish_markers(self):
         arr = MarkerArray()
+        # new_ids = set()
 
         for i, obs in enumerate(self.tracked_obstacles):
             m = Marker()
             m.header.frame_id = "map"
             m.header.stamp = self.current_stamp
             m.ns = "obstacles"
-            m.id = int(getattr(obs, "id", i))  
+            # m.id = int(getattr(obs, "id", i))
+            m.id = i
             m.type = Marker.CUBE
             m.action = Marker.ADD
             m.pose.position.x = float(obs.center_x)
@@ -526,16 +540,32 @@ class Detect(Node):
             m.color.r = 1.0
             m.color.g = 0.0
             m.color.b = 0.0
+            m.lifetime = DurationMsg(sec=0, nanosec=int(0.05 * 1e9))
 
             arr.markers.append(m)
+        #     new_ids.add(i)
 
+        # vanished_ids = self.prev_ids - new_ids
+        # self.get_logger().info(f"Vanished IDs: {vanished_ids}")
+        # for vid in vanished_ids:
+        #     m = Marker()
+        #     m.header.frame_id = "map"
+        #     m.header.stamp = self.current_stamp
+        #     m.ns = "obstacles"
+        #     m.id = vid
+        #     m.action = Marker.DELETE
+            # arr.markers.append(m)
+
+        # self.prev_ids = new_ids
         self.pub_markers.publish(self.clearmarkers()) 
         self.pub_markers.publish(arr)
-        Obstacle.current_id = 0
+
+        # Obstacle.current_id = 0
 
     def publish_obstacles(self, xy, sd):
         arr = MarkerArray()
         stamp = self.get_clock().now().to_msg()
+        # new_ids = set()
 
         for i in range(len(xy)):
             x, y = xy[i]  
@@ -553,24 +583,23 @@ class Detect(Node):
             m.pose.position.x = float(x)
             m.pose.position.y = float(y)
             m.pose.orientation.w = 1.0
+            m.lifetime = DurationMsg(sec=0, nanosec=int(0.05 * 1e9))
             arr.markers.append(m)
+            # new_ids.add(i)
 
-            # t = Marker()
-            # t.header.frame_id = 'map' # "ego_racecar/base_link"
-            # t.header.stamp = stamp
-            # t.ns = "obstacles_text"
-            # t.id = 1000 + i      
-            # t.action = Marker.ADD
-            # t.type = Marker.TEXT_VIEW_FACING
-            # t.scale.z = 0.1        
-            # t.color.a = 1.0; t.color.r = 1.0; t.color.g = 1.0; t.color.b = 1.0
-            # t.pose.position.x = float(x)
-            # t.pose.position.y = float(y)
-            # t.pose.position.z = 0.5 
-            # t.pose.orientation.w = 1.0
-            # t.text = f"s={s:.1f},d={d:.1f}"
-            # arr.markers.append(t)
+        # vanished_ids = self.prev_ids_obs - new_ids
+        # self.get_logger().info(f"Vanished IDs (mid): {vanished_ids}")
+        # for vid in vanished_ids:
+        #     m = Marker()
+        #     m.header.frame_id = "map"
+        #     m.header.stamp = stamp
+        #     m.ns = "obstacles_mid"
+        #     m.id = vid
+        #     m.action = Marker.DELETE
+        #     arr.markers.append(m)
 
+        # self.prev_ids_obs = new_ids
+        self.pub_breakpoints_markers.publish(self.clearmarkers())
         self.pub_breakpoints_markers.publish(arr)
 
     def publish_track_boundaries(self):
@@ -660,6 +689,7 @@ class Detect(Node):
         use_cached = (self.H_map_bl is not None and self.t_map_bl is not None
                       and abs(scan_t.nanoseconds - self.t_map_bl.nanoseconds) <= MAX_STALENESS_NS) 
         if use_cached:
+            # self.get_logger().info('using cached H_map_bl')
             H_map_bl = self.H_map_bl
             yaw_map_from_bl = self._quat_to_yaw(self.car_pose.orientation)
         else:
@@ -706,11 +736,12 @@ class Detect(Node):
             theta_map = float(r.theta + yaw_map_from_bl)
             current_obstacles.append(Obstacle(float(c_map[0]), float(c_map[1]), float(r.size), theta_map))
 
-        self.tracked_obstacles.clear()
+        # self.tracked_obstacles.clear()
+        self.tracked_obstacles = []
         for i, ob in enumerate(current_obstacles):
             ob.id = i
             self.tracked_obstacles.append(ob)
-        # self.publish_track_boundaries()
+        self.publish_track_boundaries()
         self.publish_markers()
         # Optional debug of midpoints:
         self.publish_obstacles(mids_map, mids_sd)

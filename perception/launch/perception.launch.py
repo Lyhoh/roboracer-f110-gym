@@ -28,4 +28,10 @@ def generate_launch_description():
             name='opponent_tracker',
             output='screen',
         ),
+        # Node(
+        #     package='perception',
+        #     executable='ekf_vs_gt_monitor',  
+        #     name='ekf_vs_gt_monitor',
+        #     output='screen',
+        # ),
     ])

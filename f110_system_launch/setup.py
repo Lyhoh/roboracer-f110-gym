@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 import os
 from glob import glob
 
-package_name = 'perception'
+package_name = 'f110_system_launch'
 
 setup(
     name=package_name,
@@ -12,7 +12,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py'))
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -23,12 +23,6 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'detect = perception.detect:main',
-            'detect_1 = perception.detect_1:main',
-            'opponent_tracker = perception.opponent_tracker:main',
-            'tf_bridge_map_odom = perception.tf_bridge_map_odom:main',
-            'waypoints_from_csv = perception.waypoints_from_csv_node:main',
-            'ekf_vs_gt_monitor = perception.ekf_vs_gt_monitor:main',
         ],
     },
 )
