@@ -6,12 +6,6 @@ def generate_launch_description():
         # SetParameter(name='use_sim_time', value=True),
         Node(
             package='perception',
-            executable='waypoints_from_csv',  
-            name='waypoints_from_csv',
-            output='screen',
-        ),
-        Node(
-            package='perception',
             executable='tf_bridge_map_odom',  
             name='tf_bridge_map_odom',
             output='screen',

@@ -12,7 +12,7 @@ import os
 
 class WaypointPublisher(Node):
     """
-    Publish /global_waypoints from a CSV.
+    Publish /global_centerline from a CSV.
     CSV must be either:
       A) x_m,y_m,s_m,d_left,d_right  (preferred)
       B) x_m,y_m,w_tr_right_m,w_tr_left_m (then we compute s_m)
@@ -80,7 +80,7 @@ class WaypointPublisher(Node):
         self.msg.header.frame_id = frame_id
         self.msg.wpnts = waypoints
 
-        self.pub = self.create_publisher(WaypointArray, '/global_waypoints', 10)
+        self.pub = self.create_publisher(WaypointArray, '/global_centerline', 10)
         self.timer = self.create_timer(1.0/max(rate, 1e-3), self._tick)
         self.get_logger().info(f'Loaded {len(waypoints)} waypoints from {csv_path}')
 

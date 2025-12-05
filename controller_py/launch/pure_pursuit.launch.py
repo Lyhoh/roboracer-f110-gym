@@ -9,11 +9,18 @@ def generate_launch_description():
 
     return LaunchDescription([
         # SetParameter(name='use_sim_time', value=True),
+        # Node(
+        #     package='controller_py',
+        #     executable='pure_pursuit',
+        #     name='pure_pursuit',
+        #     output='screen',
+        #     parameters=[param_file], 
+        # ),
         Node(
             package='controller_py',
-            executable='pure_pursuit',
-            name='pure_pursuit',
+            executable='pp_overtake',
+            name='pp_overtake',
             output='screen',
             parameters=[param_file], 
-        )
+        ),
     ])

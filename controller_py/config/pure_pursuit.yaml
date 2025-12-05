@@ -30,8 +30,8 @@
     steering_rate_limit: 3.0   # rad/s
 
     # --- Lateral offsets (meters): + = left of path tangent, - = right ---
-    lateral_offset_ego: -0.5   #0.40
-    lateral_offset_opp: 0.5   #-0.40
+    lateral_offset_ego: -0.5   #0.40  -0.5
+    lateral_offset_opp: 0.5   #-0.40  0.5
 
     # --- Lookahead tuning ---
     ld_min_ego: 0.6
@@ -52,5 +52,5 @@
     v_ramp_rate_opp:    2.0
 
     # Option B: constant targets if not using path vx (set use_path_speed_* = false)
-    v_target_ego: 1.0  # 3.5, 2.0, 1.0
-    v_target_opp: 1.0  # 3.0, 2.0, 1.0
+    v_target_ego: 2.0  # 3.5, 2.0, 1.0, 2.5
+    v_target_opp: 2.5  # 3.0, 2.0, 1.0, 0.5

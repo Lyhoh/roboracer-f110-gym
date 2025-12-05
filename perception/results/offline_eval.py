@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 
 # ========================= CONFIG ============================
 EKF_CSV = '/home/lyh/ros2_ws/src/f110_gym/perception/results/obstacles_ekf.csv'   # Path to EKF log CSV: columns t,s,d,vs,vd,...
-WP_CSV  = '/home/lyh/ros2_ws/src/f110_gym/perception/waypoints/map5/global_waypoints.csv'       # Path to waypoints CSV: x_m,y_m,s_m,d_left,d_right
+WP_CSV  = '/home/lyh/ros2_ws/src/f110_gym/perception/waypoints/map5/global_centerline.csv'       # Path to waypoints CSV: x_m,y_m,s_m,d_left,d_right
 
 VS_CONST = 1.0                  # Constant reference tangential speed [m/s]
 D0       = 0.0                  # Reference lateral offset [m], 0 = centerline

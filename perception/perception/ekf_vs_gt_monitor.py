@@ -1,7 +1,7 @@
 """
 EKF vs GT online monitor (using your FrenetConverter).
 Subscribes:
-  - /global_waypoints (for converter)
+  - /global_centerline (for converter)
   - /opp_racecar/odom  (GT in world frame)
   - /perception/obstacles (EKF estimate in Frenet)
 Publishes:
@@ -80,7 +80,7 @@ class EkfVsGtMonitor(Node):
                             history=HistoryPolicy.KEEP_LAST, depth=1,
                             durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
-        self.sub_wp  = self.create_subscription(WaypointArray, '/global_waypoints', self.cb_wp, qos_wp)
+        self.sub_wp  = self.create_subscription(WaypointArray, '/global_centerline', self.cb_wp, qos_wp)
         self.sub_gt  = self.create_subscription(Odometry, '/opp_racecar/odom', self.cb_gt, qos)
         self.sub_ekf = self.create_subscription(ObstacleArray, '/perception/obstacles', self.cb_ekf, qos)
 
@@ -89,6 +89,7 @@ class EkfVsGtMonitor(Node):
 
         self.fc: Optional[FrenetConverter] = None
         self.track_length: float = 0.0
+        self.centerline_xy = None
 
         self.gt_buf: deque[Odometry] = deque(maxlen=200)
 
@@ -119,6 +120,23 @@ class EkfVsGtMonitor(Node):
         self.log_vd_true = []
         self.log_vd_est  = []
 
+
+        # --- detection (raw) subscription ---
+        self.sub_det = self.create_subscription(
+            ObstacleArray, '/perception/raw_obstacles', self.cb_det, qos
+        )
+        self.det_buf: deque[ObstacleArray] = deque(maxlen=200)
+
+        # --- detection vs tracking logging buffers ---
+        self.log_xy_det = []        # (x_det, y_det)
+        self.log_det_ex = []        # detection - tracking error X
+        self.log_det_ey = []        # detection - tracking error Y
+        self.log_det_dist = []      # Euclidean |det - trk| in XY
+
+        self.log_det_es = []        # detection - tracking e_s (wrapped)
+        self.log_det_ed = []        # detection - tracking e_d
+
+
         self.get_logger().info('[EkfVsGtMonitor] node started.')
 
     # ---------- Waypoints → FrenetConverter ----------
@@ -139,6 +157,31 @@ class EkfVsGtMonitor(Node):
         self.fc = FrenetConverter(waypoints_x=x, waypoints_y=y, waypoints_psi=psi)
         self.track_length = float(self.fc.raceline_length)
         self.get_logger().info(f'[Monitor] FrenetConverter ready. L={self.track_length:.2f} m.')
+
+        # --- directly cache the centerline from waypoints ---
+        try:
+            self.centerline_xy = np.array([[w.x_m, w.y_m] for w in msg.wpnts], dtype=float)
+            self.get_logger().info(f"[Monitor] Cached {len(self.centerline_xy)} centerline points from waypoints.")
+        except Exception as e:
+            self.centerline_xy = None
+            self.get_logger().warn(f"[Monitor] Failed to cache centerline: {e}")
+
+
+    def cb_det(self, msg: ObstacleArray):
+        self.det_buf.append(msg)
+
+    def get_nearest_det(self, t_target: Time) -> Optional[ObstacleArray]:
+        if not self.det_buf:
+            return None
+        best, best_dt = None, 1e9
+        for m in reversed(self.det_buf):
+            dt = abs((Time.from_msg(m.header.stamp) - t_target).nanoseconds) * 1e-9
+            if dt < best_dt:
+                best_dt = dt; best = m
+            if dt > self.max_time_gap and best is not None:
+                break
+        return best if best_dt <= self.max_time_gap else None
+
 
     # ---------- Buffer GT ----------
     def cb_gt(self, msg: Odometry):
@@ -274,6 +317,51 @@ class EkfVsGtMonitor(Node):
         self.log_vs_true.append(vs_true); self.log_vs_est.append(vs_est)
         self.log_vd_true.append(vd_true); self.log_vd_est.append(vd_est)
 
+        # --- nearest detection frame to EKF time ---
+        det_arr = self.get_nearest_det(t_ekf)
+        det = None
+        if det_arr is not None and det_arr.obstacles:
+            # pick detection closest to EKF estimate in (s,d)
+            s_ref, d_ref = float(ekf.s_center), float(ekf.d_center)
+            def sd_cost(o):
+                ds = (float(o.s_center) - s_ref + 0.5*self.track_length) % self.track_length - 0.5*self.track_length
+                dd = float(o.d_center) - d_ref
+                return abs(ds) + abs(dd)
+            det = min(det_arr.obstacles, key=sd_cost)
+
+        # --- if we have a detection, compare to EKF (tracking) ---
+        if det is not None:
+            s_det = float(det.s_center)
+            d_det = float(det.d_center)
+
+            # Frenet residuals (det - trk)
+            e_s_dt = wrap_s_residual(
+                normalize_s(s_det, self.track_length) - normalize_s(s_est, self.track_length),
+                self.track_length
+            )
+            e_d_dt = d_det - d_est
+
+            # Convert detection (s,d) to XY
+            xy_det = self.fc.get_cartesian(np.array([s_det]), np.array([d_det]))
+            x_det, y_det = float(xy_det[0][0]), float(xy_det[1][0])
+
+            # Cartesian diffs (det - trk)
+            ex_dt = x_det - x_est
+            ey_dt = y_det - y_est
+            dist_dt = math.hypot(ex_dt, ey_dt)
+
+            # Log for later plotting
+            self.log_xy_det.append((x_det, y_det))
+            self.log_det_ex.append(ex_dt)
+            self.log_det_ey.append(ey_dt)
+            self.log_det_dist.append(dist_dt)
+            self.log_det_es.append(e_s_dt)
+            self.log_det_ed.append(e_d_dt)
+        else:
+            # keep vector lengths aligned if you prefer; or just skip
+            pass
+
+
     def show_figure(self):
         """Show a single figure with multiple subplots (no saving)."""
         if len(self.log_t) == 0:
@@ -353,16 +441,13 @@ class EkfVsGtMonitor(Node):
         mask = np.isfinite(ex) & np.isfinite(ey)
         ex, ey = ex[mask], ey[mask]
 
-        # ex, ey 是你的线性误差（单位 m），已按 step 下采样并做了 finite 掩码
         ax_xy = fig.add_subplot(gs[1, 2])
         # ax_xy = fig.add_subplot(gs[1, 1:3]) 
 
-        # 1) hexbin：密度可视化，log 计数缩放，网格适中
         hb = ax_xy.hexbin(ex, ey, gridsize=40, cmap='Blues', bins='log', mincnt=1)
         cb = fig.colorbar(hb, ax=ax_xy)
         cb.set_label('count (log scale)')
 
-        # 2) 叠加均值和 1σ 椭圆
         mx, my = ex.mean(), ey.mean()
         cov = np.cov(np.vstack([ex, ey]))
         vals, vecs = np.linalg.eigh(cov)
@@ -371,7 +456,6 @@ class EkfVsGtMonitor(Node):
         ax_xy.plot(ell[0] + mx, ell[1] + my, 'r--', lw=2.0, label="1σ ellipse")
         ax_xy.scatter([mx], [my], marker='x', s=90, color='r', label='mean')
 
-        # 3) 视觉设置
         xlo, xhi = np.percentile(ex, [1, 99])
         ylo, yhi = np.percentile(ey, [1, 99])
         padx = 0.5 * max(abs(xlo), abs(xhi))
@@ -485,7 +569,100 @@ class EkfVsGtMonitor(Node):
         fig.savefig(os.path.join(save_dir, fname), dpi=150, bbox_inches="tight")
         self.get_logger().info(f"Saved comparison figure: {os.path.join(save_dir, fname)}")
         
+        # plt.show()
+        plt.show(block=False)
+        plt.pause(0.1)
+
+    def show_det_vs_trk_figure(self):
+        """Show/save a figure comparing Detection vs Tracking in XY and Frenet."""
+        if len(self.log_det_dist) == 0:
+            self.get_logger().warn("No detection samples to compare; nothing to display.")
+            return
+
+        t = np.array(self.log_t)
+        # Make sure all arrays have same length (guard for occasional missing det frames)
+        n = min(len(t),
+                len(self.log_det_dist),
+                len(self.log_det_es), len(self.log_det_ed),
+                len(self.log_xy_est), len(self.log_xy_det))
+        t = t[:n]
+        det_dist = np.array(self.log_det_dist[:n])
+        e_s_dt   = np.array(self.log_det_es[:n])
+        e_d_dt   = np.array(self.log_det_ed[:n])
+
+        xy_trk = np.array(self.log_xy_est[:n])
+        xy_det = np.array(self.log_xy_det[:n])
+
+        # light downsample if long
+        step = max(1, len(t)//4000)
+        t, det_dist, e_s_dt, e_d_dt = t[::step], det_dist[::step], e_s_dt[::step], e_d_dt[::step]
+        xy_trk, xy_det = xy_trk[::step], xy_det[::step]
+
+        fig = plt.figure(figsize=(14, 6), constrained_layout=True)
+        gs = fig.add_gridspec(1, 2)
+
+        # Left: time series (distance + Frenet residuals)
+        ax_ts = fig.add_subplot(gs[0, 0])
+        ax_ts.plot(t, det_dist, label="|det - trk| in XY [m]")
+        ax_ts.plot(t, e_s_dt,  label="e_s (det - trk) [m]")
+        ax_ts.plot(t, e_d_dt,  label="e_d (det - trk) [m]")
+        ax_ts.set_title("Detection vs Tracking (time series)")
+        ax_ts.set_xlabel("time [s]")
+        ax_ts.legend(loc="best")
+        ax_ts.grid(True, alpha=0.3)
+
+        # Right: XY overlay of detection vs tracking (+GT)
+        ax_xy = fig.add_subplot(gs[0, 1])
+
+        # Tracking (EKF)
+        ax_xy.plot(xy_trk[:, 0], xy_trk[:, 1], lw=1.2, color='tab:blue', label="Tracking (EKF)")
+
+        # Detection (raw)
+        ax_xy.plot(xy_det[:, 0], xy_det[:, 1], lw=1.0, color='tab:orange', label="Detection (raw)")
+
+        # Ground truth (GT) — use the same downsample as others
+        xy_gt = np.array(self.log_xy_ref[:n])[::step]
+        ax_xy.plot(xy_gt[:, 0], xy_gt[:, 1], lw=1.2, color='tab:green', label="Ground Truth")
+
+        # Plot formatting
+        ax_xy.set_title("XY overlay: Detection vs Tracking vs GT")
+        ax_xy.set_xlabel("x [m]")
+        ax_xy.set_ylabel("y [m]")
+        ax_xy.axis("equal")
+        ax_xy.grid(True, alpha=0.25)
+        ax_xy.legend(loc="best")
+
+        # # Right: XY overlay of detection vs tracking (+GT + centerline)
+        # ax_xy = fig.add_subplot(gs[0, 1])
+
+        # # --- draw centerline if available ---
+        # if self.centerline_xy is not None and len(self.centerline_xy) > 1:
+        #     ax_xy.plot(self.centerline_xy[:, 0], self.centerline_xy[:, 1],
+        #             lw=1.0, color='0.6', alpha=0.8, zorder=0, label="Centerline")
+
+        # # Tracking (EKF)
+        # ax_xy.plot(xy_trk[:, 0], xy_trk[:, 1], lw=1.2, color='tab:blue', zorder=2, label="Tracking (EKF)")
+        # # Detection (raw)
+        # ax_xy.plot(xy_det[:, 0], xy_det[:, 1], lw=1.0, color='tab:orange', zorder=3, label="Detection (raw)")
+        # # Ground truth (GT)
+        # xy_gt = np.array(self.log_xy_ref[:n])[::step]
+        # ax_xy.plot(xy_gt[:, 0], xy_gt[:, 1], lw=1.2, color='tab:green', zorder=4, label="Ground Truth")
+
+        # ax_xy.set_title("XY overlay: Detection vs Tracking vs GT (+Centerline)")
+        # ax_xy.set_xlabel("x [m]")
+        # ax_xy.set_ylabel("y [m]")
+        # ax_xy.axis("equal")
+        # ax_xy.grid(True, alpha=0.25)
+        # ax_xy.legend(loc="best")
+
+
+        # Save next to your other outputs
+        save_dir = '/home/lyh/ros2_ws/src/f110_gym/perception/results/'
+        os.makedirs(save_dir, exist_ok=True)
+        fig.savefig(os.path.join(save_dir, "det_vs_trk.png"), dpi=150, bbox_inches="tight")
+        self.get_logger().info(f"Saved detection-vs-tracking figure to {os.path.join(save_dir, 'det_vs_trk.png')}")
         plt.show()
+
 
 
 
@@ -498,9 +675,11 @@ def main():
         pass
     finally:
         try:
-            # pass
-            node.show_figure()  # <-- show on Ctrl+C
-            node.show_compare_figure()
+            pass
+            # node.show_figure()  # <-- show on Ctrl+C
+            # node.show_compare_figure()
+            # node.show_det_vs_trk_figure()
+
         except Exception as e:
             node.get_logger().error(f"Failed to show figure: {e}")
         node.destroy_node()

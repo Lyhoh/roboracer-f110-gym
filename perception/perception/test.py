@@ -2,7 +2,7 @@
 # import matplotlib.pyplot as plt
 
 # # 读取CSV，假设有表头：x_m,y_m,s_m,d_left,d_right
-# data = np.genfromtxt('/home/lyh/ros2_ws/src/f110_gym/perception/waypoints/map5/global_waypoints.csv', delimiter=",", names=True)
+# data = np.genfromtxt('/home/lyh/ros2_ws/src/f110_gym/perception/waypoints/map5/global_centerline.csv', delimiter=",", names=True)
 
 # x = data['x_m']
 # y = data['y_m']
@@ -46,7 +46,7 @@
 # import matplotlib.pyplot as plt
 
 # # 读取CSV
-# data = np.genfromtxt('/home/lyh/ros2_ws/src/f110_gym/perception/waypoints/map5/global_waypoints.csv', delimiter=",", names=True)
+# data = np.genfromtxt('/home/lyh/ros2_ws/src/f110_gym/perception/waypoints/map5/global_centerline.csv', delimiter=",", names=True)
 
 # x = data['x_m']
 # y = data['y_m']
@@ -92,8 +92,8 @@ import numpy as np
 from pathlib import Path
 
 # ======= CONFIG （直接改这里即可）=======
-INPUT_CSV  = Path("/home/lyh/ros2_ws/src/f110_gym/perception/waypoints/map5/global_waypoints.csv")                 # 原始CSV
-OUTPUT_CSV = Path("/home/lyh/ros2_ws/src/f110_gym/perception/waypoints/map5/global_waypoints1.csv")       # 输出CSV
+INPUT_CSV  = Path("/home/lyh/ros2_ws/src/f110_gym/perception/waypoints/map5/global_centerline.csv")                 # 原始CSV
+OUTPUT_CSV = Path("/home/lyh/ros2_ws/src/f110_gym/perception/waypoints/map5/global_centerline1.csv")       # 输出CSV
 START_ROW_WITH_HEADER = 257  # 以整表行号计：表头=第1行 -> 从第257行数据开始
 ADD_WRAP_DISTANCE_TO_LAST = False  # 若想让最后一个点的s包含“末点到首点”的闭环距离，设为True
 # =======================================

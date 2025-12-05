@@ -27,7 +27,6 @@ setup(
             'detect_1 = perception.detect_1:main',
             'opponent_tracker = perception.opponent_tracker:main',
             'tf_bridge_map_odom = perception.tf_bridge_map_odom:main',
-            'waypoints_from_csv = perception.waypoints_from_csv_node:main',
             'ekf_vs_gt_monitor = perception.ekf_vs_gt_monitor:main',
         ],
     },

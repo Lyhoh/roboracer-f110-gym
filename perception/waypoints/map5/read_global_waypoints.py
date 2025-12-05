@@ -16,7 +16,7 @@ import numpy as np
 
 # ====== CONFIG ======
 CENTERLINE_CSV = "/home/lyh/ros2_ws/src/f110_gym/global-planning/outputs/map5/centerline.csv"   # <-- change to your path
-OUT_CSV        = "/home/lyh/ros2_ws/src/f110_gym/perception/waypoints/map5/global_waypoints.csv"
+OUT_CSV        = "/home/lyh/ros2_ws/src/f110_gym/perception/waypoints/map5/global_centerline.csv"
 CLOSE_LOOP     = False  # True if the track is a closed loop
 
 def load_centerline(path):

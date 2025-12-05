@@ -23,6 +23,7 @@
 
 import rclpy
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
@@ -39,34 +40,75 @@ import gym
 import numpy as np
 from transforms3d import euler
 
+import os
+from ament_index_python.packages import get_package_share_directory
+
 
 class GymBridge(Node):
     def __init__(self):
         super().__init__('gym_bridge')
 
-        self.declare_parameter('ego_namespace')
-        self.declare_parameter('ego_odom_topic')
-        self.declare_parameter('ego_opp_odom_topic')
-        self.declare_parameter('ego_scan_topic')
-        self.declare_parameter('ego_drive_topic')
-        self.declare_parameter('opp_namespace')
-        self.declare_parameter('opp_odom_topic')
-        self.declare_parameter('opp_ego_odom_topic')
-        self.declare_parameter('opp_scan_topic')
-        self.declare_parameter('opp_drive_topic')
-        self.declare_parameter('scan_distance_to_base_link')
-        self.declare_parameter('scan_fov')
-        self.declare_parameter('scan_beams')
-        self.declare_parameter('map_path')
-        self.declare_parameter('map_img_ext')
-        self.declare_parameter('num_agent')
-        self.declare_parameter('sx')
-        self.declare_parameter('sy')
-        self.declare_parameter('stheta')
-        self.declare_parameter('sx1')
-        self.declare_parameter('sy1')
-        self.declare_parameter('stheta1')
-        self.declare_parameter('kb_teleop')
+        # self.declare_parameter('ego_namespace')
+        # self.declare_parameter('ego_odom_topic')
+        # self.declare_parameter('ego_opp_odom_topic')
+        # self.declare_parameter('ego_scan_topic')
+        # self.declare_parameter('ego_drive_topic')
+        # self.declare_parameter('opp_namespace')
+        # self.declare_parameter('opp_odom_topic')
+        # self.declare_parameter('opp_ego_odom_topic')
+        # self.declare_parameter('opp_scan_topic')
+        # self.declare_parameter('opp_drive_topic')
+        # self.declare_parameter('scan_distance_to_base_link')
+        # self.declare_parameter('scan_fov')
+        # self.declare_parameter('scan_beams')
+        # self.declare_parameter('map_path')
+        # self.declare_parameter('map_img_ext')
+        # self.declare_parameter('num_agent')
+        # self.declare_parameter('sx')
+        # self.declare_parameter('sy')
+        # self.declare_parameter('stheta')
+        # self.declare_parameter('sx1')
+        # self.declare_parameter('sy1')
+        # self.declare_parameter('stheta1')
+        # self.declare_parameter('kb_teleop')
+
+        # Declare all parameters with explicit types
+        # String parameters (namespaces, topics, map paths, etc.)
+        self.declare_parameter('ego_namespace', Parameter.Type.STRING)          # e.g. "ego"
+        self.declare_parameter('ego_odom_topic', Parameter.Type.STRING)         # e.g. "odom"
+        self.declare_parameter('ego_opp_odom_topic', Parameter.Type.STRING)     # e.g. "opp_odom"
+        self.declare_parameter('ego_scan_topic', Parameter.Type.STRING)         # e.g. "scan"
+        self.declare_parameter('ego_drive_topic', Parameter.Type.STRING)        # e.g. "drive"
+
+        self.declare_parameter('opp_namespace', Parameter.Type.STRING)          # e.g. "opp"
+        self.declare_parameter('opp_odom_topic', Parameter.Type.STRING)         # e.g. "odom"
+        self.declare_parameter('opp_ego_odom_topic', Parameter.Type.STRING)     # e.g. "ego_odom"
+        self.declare_parameter('opp_scan_topic', Parameter.Type.STRING)         # e.g. "scan"
+        self.declare_parameter('opp_drive_topic', Parameter.Type.STRING)        # e.g. "drive"
+
+        self.declare_parameter('map_path', Parameter.Type.STRING)             
+        # self.declare_parameter('map_name', 'IMS')     
+        self.declare_parameter('map_img_ext', Parameter.Type.STRING)            # e.g. ".png"
+
+        # Numeric parameters (double / integer)
+        self.declare_parameter('scan_distance_to_base_link', Parameter.Type.DOUBLE)  # float, lidar offset
+        self.declare_parameter('scan_fov', Parameter.Type.DOUBLE)                    # float, radians
+        self.declare_parameter('scan_beams', Parameter.Type.INTEGER)                 # int, number of beams
+
+        self.declare_parameter('num_agent', Parameter.Type.INTEGER)                  # int, 1 or 2
+
+        # Initial poses (float)
+        self.declare_parameter('sx', Parameter.Type.DOUBLE)                          # ego start x
+        self.declare_parameter('sy', Parameter.Type.DOUBLE)                          # ego start y
+        self.declare_parameter('stheta', Parameter.Type.DOUBLE)                      # ego start yaw
+
+        self.declare_parameter('sx1', Parameter.Type.DOUBLE)                         # opp start x
+        self.declare_parameter('sy1', Parameter.Type.DOUBLE)                         # opp start y
+        self.declare_parameter('stheta1', Parameter.Type.DOUBLE)                     # opp start yaw
+
+        # Boolean
+        self.declare_parameter('kb_teleop', Parameter.Type.BOOL)                     # whether to enable /cmd_vel teleop
+
 
         # check num_agents
         num_agents = self.get_parameter('num_agent').value
@@ -76,8 +118,12 @@ class GymBridge(Node):
             raise ValueError('num_agents should be an int.')
 
         # env backend
+        # pkg_path = get_package_share_directory('f1tenth_gym_ros')
+        # map_name = self.get_parameter('map_name').value
+        # map_path = os.path.join(pkg_path, 'maps', 'f1tenth_racetracks', map_name, map_name + '_map')
         self.env = gym.make('f110_gym:f110-v0',
                             map=self.get_parameter('map_path').value,
+                            # map=map_path,
                             map_ext=self.get_parameter('map_img_ext').value,
                             num_agents=num_agents,
                             lidar_dist=self.get_parameter("scan_distance_to_base_link").value

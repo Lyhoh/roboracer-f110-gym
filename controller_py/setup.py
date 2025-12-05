@@ -24,6 +24,7 @@ setup(
     entry_points={
         'console_scripts': [
             'pure_pursuit = controller_py.pure_pursuit_node:main',
+            'pp_overtake = controller_py.pp_overtake:main',
         ],
     },
 )

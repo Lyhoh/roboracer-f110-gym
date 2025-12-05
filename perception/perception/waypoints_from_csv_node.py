@@ -11,10 +11,10 @@ class WaypointsFromCsvNode(Node):
         super().__init__('waypoints_from_csv')
 
         # --- Parameters ---
-        self.declare_parameter('csv_path', '/home/lyh/ros2_ws/src/f110_gym/perception/waypoints/map5/global_waypoints.csv')
-        self.declare_parameter('topic', '/global_waypoints')
+        self.declare_parameter('csv_path', '/home/lyh/ros2_ws/src/f110_gym/perception/waypoints/map5/global_centerline.csv')
+        self.declare_parameter('topic', '/global_centerline')
         self.declare_parameter('frame_id', 'map')
-        self.declare_parameter('publish_rate', 0)  # Hz; 0 -> publish once then stop  # 0.5
+        self.declare_parameter('publish_rate', 0.5)  # Hz; 0 -> publish once then stop  # 0.5
 
         csv_path = self.get_parameter('csv_path').get_parameter_value().string_value
         self.topic = self.get_parameter('topic').get_parameter_value().string_value

@@ -7,6 +7,10 @@ Panels:
         - /Map1/Topic1
         - /RobotModel2
         - /MarkerArray1
+        - /MarkerArray2
+        - /MarkerArray3
+        - /MarkerArray4
+        - /Marker1
       Splitter Ratio: 0.5
     Tree Height: 671
   - Class: rviz_common/Selection
@@ -67,8 +71,8 @@ Visualization Manager:
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
-        Max Value: 1.5321836471557617
-        Min Value: -0.1846713274717331
+        Max Value: 34.96927261352539
+        Min Value: 4.072508335113525
         Value: true
       Axis: X
       Channel Name: intensity
@@ -230,30 +234,6 @@ Visualization Manager:
       Enabled: true
       Name: MarkerArray
       Namespaces:
-        obstacles: true
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /opponent_detection/markers
-      Value: true
-    - Class: rviz_default_plugins/MarkerArray
-      Enabled: true
-      Name: MarkerArray
-      Namespaces:
-        obstacles_mid: true
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /opponent_detection/breakpoints
-      Value: true
-    - Class: rviz_default_plugins/MarkerArray
-      Enabled: true
-      Name: MarkerArray
-      Namespaces:
         "": true
       Topic:
         Depth: 5
@@ -261,6 +241,96 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /perception/static_dynamic_marker_pub
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: MarkerArray
+      Namespaces:
+        obstacles: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /perception/markers
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: false
+      Name: MarkerArray
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /perception/raw_obstacles_markers
+      Value: false
+    - Alpha: 1
+      Buffer Length: 1
+      Class: rviz_default_plugins/Path
+      Color: 25; 255; 0
+      Enabled: true
+      Head Diameter: 0.30000001192092896
+      Head Length: 0.20000000298023224
+      Length: 0.30000001192092896
+      Line Style: Lines
+      Line Width: 0.029999999329447746
+      Name: Path
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Pose Color: 255; 85; 255
+      Pose Style: None
+      Radius: 0.029999999329447746
+      Shaft Diameter: 0.10000000149011612
+      Shaft Length: 0.10000000149011612
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /planner/avoidance/path
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: false
+      Name: MarkerArray
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /planner/avoidance/markers
+      Value: false
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: Marker
+      Namespaces:
+        "": true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /perception/boundaries
+      Value: true
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: Marker
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /planner/global_waypoints_markers
       Value: true
   Enabled: true
   Global Options:
@@ -308,7 +378,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 8.980867385864258
+      Distance: 161.23068237304688
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -323,10 +393,10 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.5697963237762451
+      Pitch: 1.139796257019043
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 3.2904164791107178
+      Yaw: 4.080411434173584
     Saved: ~
 Window Geometry:
   Displays:
@@ -342,5 +412,5 @@ Window Geometry:
   Views:
     collapsed: false
   Width: 1600
-  X: 70
-  Y: 224
+  X: 394
+  Y: 413

@@ -14,6 +14,7 @@ from perception.frenet_converter import FrenetConverter
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy   
 import numpy.linalg as npl 
 import csv, os
+from builtin_interfaces.msg import Duration as DurationMsg
 
 
 # ---------- small helpers ----------
@@ -48,29 +49,13 @@ class SingleOpponentKF:
                  P0_diag = (0.5, 1.0, 0.2, 0.5)):
 
         # EKF
-        self.ekf = EKF(dim_x=4, dim_z=4)  # IMPORTANT: dim_z = 4
+        self.ekf = EKF(dim_x=4, dim_z=4)  # dim_z = 4
         self.ekf.x = np.zeros(4)  # [s, vs, d, vd]
 
         self.q_vs = float(q_vs)
         self.q_vd = float(q_vd)
         self.rate = max(1.0, float(rate_hz))
         self.dt = self._set_dt(1.0 / self.rate)
-
-        # # State transition (linear CV)
-        # self.ekf.F = np.array([
-        #     [1.0, self.dt, 0.0,     0.0],
-        #     [0.0, 1.0,     0.0,     0.0],
-        #     [0.0, 0.0,     1.0,     self.dt],
-        #     [0.0, 0.0,     0.0,     1.0]
-        # ], dtype=float)
-
-        # # Process noise (block diag for s-chain and d-chain)
-        # q1 = Q_discrete_white_noise(dim=2, dt=self.dt, var=max(1e-6, q_vs))
-        # q2 = Q_discrete_white_noise(dim=2, dt=self.dt, var=max(1e-6, q_vd))
-        # self.ekf.Q = np.block([
-        #     [q1,              np.zeros((2,2))],
-        #     [np.zeros((2,2)), q2]
-        # ])
 
         # Measurement model: direct observe [s, vs, d, vd]
         self.ekf.H = np.eye(4)
@@ -224,12 +209,12 @@ class OpponentTrackerNode(Node):
 
         # ---- parameters ----
         self.declare_parameter('rate', 20.0)
-        self.declare_parameter('P_vs', 0.0)
-        self.declare_parameter('P_d',  0.2)
-        self.declare_parameter('P_vd', 0.4)
+        self.declare_parameter('P_vs', 0.0)  # 0.0
+        self.declare_parameter('P_d',  0.0)  # 0.2
+        self.declare_parameter('P_vd', 0.4)  # 0.4
 
-        self.declare_parameter('process_var_vs', 0.3)   # Q for vs chain
-        self.declare_parameter('process_var_vd', 0.3)   # Q for vd chain
+        self.declare_parameter('process_var_vs', 0.3)   # Q for vs chain  # 0.3
+        self.declare_parameter('process_var_vd', 0.3)   # Q for vd chain  # 0.3
 
         self.declare_parameter('meas_var_s',  0.05)     # R diag
         self.declare_parameter('meas_var_vs', 0.8)  # 0.8
@@ -293,6 +278,9 @@ class OpponentTrackerNode(Node):
 
         self.prev_meas_t = None
         self.last_pred_t = None
+        
+        self.track_ready = False
+        self.path_needs_update = True 
 
         # ---- QoS ----
         qos = QoSProfile(
@@ -311,8 +299,12 @@ class OpponentTrackerNode(Node):
         self.pub_fused  = self.create_publisher(ObstacleArray, '/perception/obstacles', 10)
         self.pub_marker = self.create_publisher(MarkerArray, '/perception/static_dynamic_marker_pub', 10)
 
-        self.sub_obs = self.create_subscription(ObstacleArray, '/opponent_detection/raw_obstacles', self.cb_obstacles, qos)
-        self.sub_wp  = self.create_subscription(WaypointArray, '/global_waypoints', self.cb_waypoints, qos_wp)
+        # self.pub_assoc = self.create_publisher(Marker, '/perception/ekf_associated_meas', 10)
+        self.pub_raw_markers = self.create_publisher(MarkerArray, '/perception/raw_obstacles_markers', 10)
+
+
+        self.sub_obs = self.create_subscription(ObstacleArray, '/perception/raw_obstacles', self.cb_obstacles, qos)
+        self.sub_wp  = self.create_subscription(WaypointArray, '/global_centerline', self.cb_waypoints, qos_wp)
         # Optional (if you need car s, not required for this simple node)
         # self.sub_car = self.create_subscription(Odometry, '/car_state/odom_frenet',
         #                                         self.cb_car_frenet, qos)
@@ -323,17 +315,10 @@ class OpponentTrackerNode(Node):
         # self.converter = self.init_frenet_converter()
         self.converter = None
 
-        # # self.log_csv_path = os.path.join(os.getcwd(), 'obstacles_ekf.csv')
-        # self.log_csv_path = '/home/lyh/ros2_ws/src/f110_gym/perception/results/obstacles_ekf.csv'
-        # self.log_csv_file = open(self.log_csv_path, 'w', newline='')
-        # self.log_csv = csv.writer(self.log_csv_file)
-        # self.log_csv.writerow(['t','s','d','vs','vd','s_var','vs_var','d_var','vd_var','visible'])
-        # self.get_logger().info(f'[EKF] CSV logging to {self.log_csv_path}')
-
         self.get_logger().info('[OpponentTracker] Node started.')
 
     # def init_frenet_converter(self):
-    #     rospy.wait_for_message("/global_waypoints", WaypointArray)
+    #     rospy.wait_for_message("/global_centerline", WaypointArray)
     #     # Initialize the FrenetConverter object
     #     converter = FrenetConverter(self.waypoints[:, 0], self.waypoints[:, 1])
     #     self.get_logger().info("[OpponentTracker] initialized FrenetConverter object")
@@ -341,6 +326,8 @@ class OpponentTrackerNode(Node):
 
     # --------- callbacks ---------
     def cb_waypoints(self, msg):
+        if self.global_wpnts is not None and not self.path_needs_update:
+            return
         self.global_wpnts = msg.wpnts
         self.waypoints = np.array([[wp.x_m, wp.y_m] for wp in msg.wpnts])
         if len(self.global_wpnts) > 0:
@@ -349,6 +336,9 @@ class OpponentTrackerNode(Node):
             self.tracker.set_path(self.global_wpnts, self.track_length, self.ratio_to_path)
             self.get_logger().info(f'[OpponentTracker] Received global path. Track length = {self.track_length:.2f} m')
         self.converter = FrenetConverter(self.waypoints[:, 0], self.waypoints[:, 1])
+
+        self.track_ready = True
+        self.path_needs_update = False
 
     def cb_car_frenet(self, msg: Odometry):
         # Not strictly used here, but kept for extension
@@ -360,6 +350,8 @@ class OpponentTrackerNode(Node):
             return
         if not msg.obstacles:
             return
+        
+        self.publish_raw_obstacles_markers(msg)
 
         # Choose the measurement closest to current estimate or last meas
         if self.has_target:
@@ -410,6 +402,8 @@ class OpponentTrackerNode(Node):
             self.prev_meas_t = t_meas
             self.updated_this_cycle = True
             return
+        
+        # self.publish_assoc_measurement(s_meas, d_meas)
 
         # Normal EKF update path
         self.tracker.update(s_meas, d_meas, self.prev_s, self.prev_d, dt_meas)
@@ -507,7 +501,7 @@ class OpponentTrackerNode(Node):
         m.scale.x = 0.5
         m.scale.y = 0.5
         m.scale.z = 0.5
-        m.color.a = 0.8
+        m.color.a = 1.0 # 0.8
         m.color.r = 1.0 # if self.has_target else 1.0
         m.color.g = 0.0 # if self.has_target else 0.3
         m.color.b = 0.0 # if self.has_target else 0.8
@@ -572,6 +566,85 @@ class OpponentTrackerNode(Node):
         #                     o.s_var, o.vs_var, o.d_var, o.vd_var, int(o.is_visible)])
         # self.log_csv_file.flush()
         # self.get_logger().info(f's={o.s_center:.2f} d={o.d_center:.2f} vs={o.vs:.2f} vd={o.vd:.2f}')
+
+    # def publish_assoc_measurement(self, s_meas: float, d_meas: float):
+    #     """Visualize the raw detection that EKF associated to (s_meas, d_meas)."""
+    #     if self.converter is None or self.track_length is None:
+    #         return
+
+    #     # Convert Frenet (s,d) back to map (x,y)
+    #     x, y = self.converter.get_cartesian(float(s_meas), float(d_meas))
+
+    #     m = Marker()
+    #     m.header.frame_id = 'map'
+    #     m.header.stamp = self.get_clock().now().to_msg()
+    #     m.ns = 'ekf_association'
+    #     m.id = 1
+    #     m.type = Marker.SPHERE
+    #     m.action = Marker.ADD
+    #     m.pose.position.x = float(x)
+    #     m.pose.position.y = float(y)
+    #     m.pose.position.z = 0.15
+    #     m.pose.orientation.w = 1.0
+    #     m.scale.x = 0.3
+    #     m.scale.y = 0.3
+    #     m.scale.z = 0.3
+    #     m.color.a = 0.7
+    #     m.color.r = 0.0
+    #     m.color.g = 0.0
+    #     m.color.b = 1.0     # 蓝色点：表示“被 EKF 选中的量测”
+
+    #     # lifetime 短一点，方便看动态更新
+    #     from builtin_interfaces.msg import Duration as DurationMsg
+    #     m.lifetime = DurationMsg(sec=0, nanosec=int(0.1 * 1e9))
+
+    #     self.pub_assoc.publish(m)
+
+    def publish_raw_obstacles_markers(self, msg: ObstacleArray):
+        """Visualize all raw obstacles received by the tracker."""
+        if self.converter is None or self.track_length is None:
+            return
+
+        ma = MarkerArray()
+
+        # 先清空这个 namespace 下的 marker
+        clr = Marker()
+        clr.header.frame_id = 'map'
+        clr.header.stamp = self.get_clock().now().to_msg()
+        clr.action = Marker.DELETEALL
+        ma.markers.append(clr)
+
+        for i, obs in enumerate(msg.obstacles):
+            s = float(obs.s_center)
+            d = float(obs.d_center)
+
+            # Frenet -> map
+            x, y = self.converter.get_cartesian(s, d)
+
+            m = Marker()
+            m.header.frame_id = 'map'
+            m.header.stamp = msg.header.stamp
+            m.ns = 'raw_obstacles'      # 和 ekf_association / ekf_estimate 区分开
+            m.id = i
+            m.type = Marker.SPHERE
+            m.action = Marker.ADD
+            m.pose.position.x = float(x)
+            m.pose.position.y = float(y)
+            m.pose.position.z = 0.1
+            m.pose.orientation.w = 1.0
+            m.scale.x = 0.2
+            m.scale.y = 0.2
+            m.scale.z = 0.2
+            m.color.a = 0.9
+            m.color.r = 1.0   # 生一点的颜色，表示“raw detection”
+            m.color.g = 0.5
+            m.color.b = 0.0
+            m.lifetime = DurationMsg(sec=0, nanosec=int(0.1 * 1e9))
+
+            ma.markers.append(m)
+
+        self.pub_raw_markers.publish(ma)
+
 
 
 def main():
