@@ -24,7 +24,6 @@ setup(
     entry_points={
         'console_scripts': [
             'detect = perception.detect:main',
-            'detect_1 = perception.detect_1:main',
             'opponent_tracker = perception.opponent_tracker:main',
             'tf_bridge_map_odom = perception.tf_bridge_map_odom:main',
             'ekf_vs_gt_monitor = perception.ekf_vs_gt_monitor:main',

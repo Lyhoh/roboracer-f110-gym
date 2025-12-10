@@ -23,10 +23,10 @@ from rclpy.time import Time
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 
 from nav_msgs.msg import Odometry
-from interfaces.msg import ObstacleArray, WaypointArray
+from roboracer_interfaces.msg import ObstacleArray, WaypointArray
 from std_msgs.msg import Float32MultiArray
 
-from perception.frenet_converter import FrenetConverter 
+from roboracer_utils.frenet_converter import FrenetConverter 
 
 
 def quat_to_yaw(x, y, z, w) -> float:

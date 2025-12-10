@@ -86,8 +86,7 @@ class GymBridge(Node):
         self.declare_parameter('opp_scan_topic', Parameter.Type.STRING)         # e.g. "scan"
         self.declare_parameter('opp_drive_topic', Parameter.Type.STRING)        # e.g. "drive"
 
-        self.declare_parameter('map_path', Parameter.Type.STRING)             
-        # self.declare_parameter('map_name', 'IMS')     
+        self.declare_parameter('map_path', Parameter.Type.STRING)              
         self.declare_parameter('map_img_ext', Parameter.Type.STRING)            # e.g. ".png"
 
         # Numeric parameters (double / integer)

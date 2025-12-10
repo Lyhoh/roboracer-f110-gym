@@ -4,7 +4,7 @@
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Header
-from interfaces.msg import Waypoint, WaypointArray
+from roboracer_interfaces.msg import Waypoint, WaypointArray
 
 import numpy as np
 import csv

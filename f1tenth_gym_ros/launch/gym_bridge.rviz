@@ -71,8 +71,8 @@ Visualization Manager:
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
-        Max Value: 34.96927261352539
-        Min Value: 4.072508335113525
+        Max Value: 52.58713150024414
+        Min Value: 49.3776969909668
         Value: true
       Axis: X
       Channel Name: intensity
@@ -323,7 +323,7 @@ Visualization Manager:
       Enabled: true
       Name: Marker
       Namespaces:
-        {}
+        waypoints: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -331,6 +331,31 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /planner/global_waypoints_markers
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: MarkerArray
+      Namespaces:
+        static_walls_left: true
+        static_walls_right: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /perception/static_walls
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: MarkerArray
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /perception/frenet_debug
       Value: true
   Enabled: true
   Global Options:
@@ -378,7 +403,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 161.23068237304688
+      Distance: 99.18783569335938
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -393,10 +418,10 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.139796257019043
+      Pitch: 1.2297961711883545
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 4.080411434173584
+      Yaw: 4.620412349700928
     Saved: ~
 Window Geometry:
   Displays:

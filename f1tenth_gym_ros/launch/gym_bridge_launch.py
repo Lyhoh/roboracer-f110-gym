@@ -192,7 +192,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             "map_name",
-            default_value="IMS",
+            default_value="Autodrive",
         ),
         OpaqueFunction(function=build_nodes),
     ])

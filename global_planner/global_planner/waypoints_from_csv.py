@@ -18,8 +18,8 @@ from rclpy.qos import (
 )
 from std_msgs.msg import Header
 
-from interfaces.msg import Waypoint, WaypointArray
-from perception.frenet_converter import FrenetConverter
+from roboracer_interfaces.msg import Waypoint, WaypointArray
+from roboracer_utils.frenet_converter import FrenetConverter
 
 
 class GlobalWaypointsFromCsvNode(Node):
@@ -39,20 +39,10 @@ class GlobalWaypointsFromCsvNode(Node):
         # ----------------------------
         # Parameters
         # ----------------------------
-        # self.declare_parameter(
-        #     "centerline_csv",
-        #     "/home/lyh/ros2_ws/src/f110_gym/global_planner/outputs/centerline.csv",
-        # )
-        # self.declare_parameter(
-        #     "raceline_csv",
-        #     "/home/lyh/ros2_ws/src/f110_gym/global_planner/outputs/traj_race_cl.csv",
-        # )
-        self.declare_parameter("map_name", "IMS")
+        self.declare_parameter("map_name", "Autodrive")
         self.declare_parameter("frame_id", "map")
         self.declare_parameter("publish_rate", 0.5)  # Hz, 0 → publish once
 
-        # center_csv = self.get_parameter("centerline_csv").value
-        # race_csv = self.get_parameter("raceline_csv").value
         map_name = self.get_parameter("map_name").value
         self.frame_id = self.get_parameter("frame_id").value
         rate = float(self.get_parameter("publish_rate").value)
@@ -128,69 +118,6 @@ class GlobalWaypointsFromCsvNode(Node):
         q.y = 0.0
         return q
     
-    # ============================================================
-    # Load centerline CSV
-    # ============================================================
-    # def load_centerline(
-    #     self, path: str
-    # ) -> Tuple[List[float], List[float], List[float], List[float], List[float], WaypointArray]:
-    #     """
-    #     Reads a centerline CSV containing:
-    #         x_m, y_m, s_m, d_left, d_right
-    #     Returns the fields + a WaypointArray message.
-    #     """
-    #     s_list = []
-    #     x_list = []
-    #     y_list = []
-    #     dl_list = []
-    #     dr_list = []
-    #     wp_list = []
-
-    #     with open(path, "r", newline="") as f:
-    #         reader = csv.DictReader(f)
-    #         for row in reader:
-    #             s = float(row["s_m"])
-    #             x = float(row["x_m"])
-    #             y = float(row["y_m"])
-    #             dl = float(row["d_left"])
-    #             dr = float(row["d_right"])
-
-    #             s_list.append(s)
-    #             x_list.append(x)
-    #             y_list.append(y)
-    #             dl_list.append(dl)
-    #             dr_list.append(dr)
-
-    #     msg = WaypointArray()
-    #     msg.header = Header(frame_id=self.frame_id)
-
-    #     for i, (s, x, y, dl, dr) in enumerate(
-    #         zip(s_list, x_list, y_list, dl_list, dr_list)
-    #     ):
-    #         wp = Waypoint()
-    #         wp.id = i
-
-    #         # Centerline has d_m = 0
-    #         wp.s_m = s
-    #         wp.d_m = 0.0
-
-    #         wp.x_m = x
-    #         wp.y_m = y
-
-    #         wp.d_left = dl
-    #         wp.d_right = dr
-
-    #         # Centerline typically has no curvature/speed info
-    #         wp.psi_rad = 0.0
-    #         wp.kappa_radpm = 0.0
-    #         wp.vx_mps = 0.0
-    #         wp.ax_mps2 = 0.0
-
-    #         wp_list.append(wp)
-
-    #     msg.wpnts = wp_list
-    #     return s_list, x_list, y_list, dl_list, dr_list, msg
-
     def load_centerline(
         self, path: str
     ) -> Tuple[List[float], List[float], List[float], List[float], List[float], WaypointArray]:

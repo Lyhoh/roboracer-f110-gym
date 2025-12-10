@@ -6,11 +6,12 @@ from rclpy.node import Node
 from nav_msgs.msg import Odometry, Path
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Header
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 
-from interfaces.msg import Waypoint, WaypointArray, ObstacleArray, OTWpntArray
+from roboracer_interfaces.msg import Waypoint, WaypointArray, ObstacleArray, OTWpntArray, Ready
 from visualization_msgs.msg import Marker, MarkerArray
 
-from perception.frenet_converter import FrenetConverter
+from roboracer_utils.frenet_converter import FrenetConverter
 
 
 class SimpleSQPAvoidanceNode(Node):
@@ -50,8 +51,10 @@ class SimpleSQPAvoidanceNode(Node):
 
         self.obstacles = ObstacleArray()
         self.converter: FrenetConverter = None
+        self.track_ready = False
+        self.path_needs_update = True
 
-        # For continuity (optional)
+        # For continuity
         self.last_ot_side = "right"  # "left" or "right"
         self.past_avoidance_d = None
 
@@ -62,12 +65,17 @@ class SimpleSQPAvoidanceNode(Node):
             self.ego_frenet_cb,
             10
         )
-
+        qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
         self.create_subscription(
             WaypointArray,
             '/global_centerline',  
             self.global_wp_cb,
-            10
+            qos
         )
 
         self.create_subscription(
@@ -103,6 +111,8 @@ class SimpleSQPAvoidanceNode(Node):
             10,
         )
 
+        self.pub_ready = self.create_publisher(Ready, "/local_planner/ready", 1)
+
 
         # Timer loop
         self.timer = self.create_timer(0.05, self.timer_callback)  # 20 Hz
@@ -129,6 +139,9 @@ class SimpleSQPAvoidanceNode(Node):
 
     def raceline_wp_cb(self, msg: WaypointArray):
         """Callback for global raceline waypoints (in centerline Frenet frame)."""
+        if self.track_ready and not self.path_needs_update:
+            return  
+        
         self.global_raceline_msg = msg
 
         # Extract arrays for fast interpolation
@@ -144,6 +157,10 @@ class SimpleSQPAvoidanceNode(Node):
                 v_list.append(3.0)
         self.race_v_array = np.array(v_list, dtype=float)
 
+        self.track_ready = True
+        self.path_needs_update = False
+        self.pub_ready.publish(Ready(ready=True))
+
         self.get_logger().info("[SimpleSQP] Raceline waypoints received.")
 
     def obstacles_cb(self, msg: ObstacleArray):
@@ -157,7 +174,7 @@ class SimpleSQPAvoidanceNode(Node):
         if (self.converter is None or
             self.global_waypoints_msg is None or
             self.global_raceline_msg is None):
-            self.get_logger().warn("[SimpleSQP] Waiting for centerline, raceline and FrenetConverter...")
+            # self.get_logger().warn("[SimpleSQP] Waiting for centerline, raceline and FrenetConverter...")
             return
 
         # Current Frenet state
@@ -215,7 +232,6 @@ class SimpleSQPAvoidanceNode(Node):
         # left_space = wp_center.d_left - target_obs.d_left    # free space to the left
         # right_space = target_obs.d_right - wp_center.d_right # free space to the right
 
-        # TODO:safety_margin
         # Choose side with more space
         if left_space > right_space:
             side = "left"
@@ -271,16 +287,6 @@ class SimpleSQPAvoidanceNode(Node):
                 d_profile[i] = (1.0 - beta) * d_apex + beta * 0.0
                 d_profile[i] = (1.0 - beta) * d_apex + beta * d_race[i]
 
-        # # Optionally clamp d_profile to track boundaries (with margin)
-        # for i in range(len(s_avoid_mod)):
-        #     s_i = s_avoid_mod[i]
-        #     # find closest wp to this s
-        #     idx = int(np.argmin(np.abs(s_array - s_i)))
-        #     wp = wpnts[idx]
-        #     d_min = -wp.d_right + d_margin   # right boundary is negative
-        #     d_max = wp.d_left - d_margin
-        #     d_profile[i] = float(np.clip(d_profile[i], d_min, d_max))
-
         # 6) Convert (s, d) -> (x, y) using FrenetConverter
         resp = self.converter.get_cartesian(s_avoid_mod, d_profile)
         x_array = resp[0, :]
@@ -304,28 +310,6 @@ class SimpleSQPAvoidanceNode(Node):
         self.publish_path(x_array, y_array)
         self.publish_markers(x_array, y_array, v_profile)
 
-        # # 8) Publish overtaking waypoints
-        # ot_msg = OTWpntArray()
-        # ot_msg.header = Header()
-        # ot_msg.header.stamp = self.get_clock().now().to_msg()
-        # ot_msg.header.frame_id = "map"
-
-        # wp_list = []
-        # for i, (x, y, s_i, d_i, v_i) in enumerate(zip(x_array, y_array, s_avoid_mod, d_profile, v_profile)):
-        #     wp = Waypoint()
-        #     wp.x_m = float(x)
-        #     wp.y_m = float(y)
-        #     wp.s_m = float(s_i)
-        #     wp.d_m = float(d_i)
-        #     wp.vx_mps = float(v_i)
-        #     wp_list.append(wp)
-
-        # ot_msg.wpnts = wp_list
-        # self.ot_pub.publish(ot_msg)
-
-        # self.get_logger().debug(
-        #     f"[SimpleSQP] Published {len(wp_list)} avoidance waypoints, side={side}"
-        # )
 
     # -------------------- Publish helpers -------------------- #
 

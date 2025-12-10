@@ -5,11 +5,11 @@ from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Point
 from visualization_msgs.msg import Marker, MarkerArray
-from interfaces.msg import WaypointArray, ObstacleArray, Obstacle as ObstacleMessage
+from roboracer_interfaces.msg import WaypointArray, ObstacleArray, Obstacle as ObstacleMessage
 import math
 from bisect import bisect_left
 import csv
-from perception.frenet_converter import FrenetConverter
+from roboracer_utils.frenet_converter import FrenetConverter
 from tf_transformations import quaternion_matrix, quaternion_from_euler
 from tf2_ros import Buffer, TransformListener, LookupException, ConnectivityException, ExtrapolationException
 from rclpy.duration import Duration

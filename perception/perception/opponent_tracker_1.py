@@ -5,12 +5,12 @@ from typing import Optional, List
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from interfaces.msg import WaypointArray, ObstacleArray, Obstacle
+from roboracer_interfaces.msg import WaypointArray, ObstacleArray, Obstacle
 from visualization_msgs.msg import Marker, MarkerArray
 from nav_msgs.msg import Odometry
 from filterpy.common import Q_discrete_white_noise
 from filterpy.kalman import ExtendedKalmanFilter as EKF
-from perception.frenet_converter import FrenetConverter
+from roboracer_utils.frenet_converter import FrenetConverter
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy   
 import numpy.linalg as npl 
 import csv, os

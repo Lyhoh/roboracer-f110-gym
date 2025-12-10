@@ -5,12 +5,12 @@ from typing import Optional, List
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from interfaces.msg import WaypointArray, ObstacleArray, Obstacle
+from roboracer_interfaces.msg import WaypointArray, ObstacleArray, Obstacle, Ready
 from visualization_msgs.msg import Marker, MarkerArray
 from nav_msgs.msg import Odometry
 from filterpy.common import Q_discrete_white_noise
 from filterpy.kalman import ExtendedKalmanFilter as EKF
-from perception.frenet_converter import FrenetConverter
+from roboracer_utils.frenet_converter import FrenetConverter
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy   
 import numpy.linalg as npl 
 import csv, os
@@ -171,22 +171,27 @@ class SingleOpponentKF:
     def update(self, s_meas: float, d_meas: float, s_prev: Optional[float], d_prev: Optional[float], dt: float):
         """Build 4D measurement using current and (optionally) previous point to estimate vs, vd."""
         dt = float(np.clip(dt, 1e-4, 0.5))
-        # estimate instantaneous velocities (weighted two-tap)
-        # if s_prev is not None:
-        #     vs1 = wrap_s_residual(s_meas - s_prev, self.track_length) * self.rate
-        # else:
-        #     vs1 = 0.0
-        # vd1 = (d_meas - (d_prev if d_prev is not None else d_meas)) * self.rate
 
+        # 1) Estimate instantaneous velocities in Frenet frame
         vs1 = wrap_s_residual(s_meas - (s_prev if s_prev is not None else s_meas), self.track_length) / dt
         vd1 = (d_meas - (d_prev if d_prev is not None else d_meas)) / dt
 
+        # 2) Simple physical sanity check:
+        if not (-1.0 <= vs1 <= 8.0):
+            print(f"[SingleOpponentKF] Rejecting update: vs1={vs1:.2f} m/s out of range.")
+            return
+
+        if abs(vd1) > 5.0:
+            return
+        
+        # 3) Build measurement vector
         z = np.array([normalize_s(s_meas, self.track_length), vs1, d_meas, vd1], dtype=float)
 
+        # 4) EKF update with ring-aware residual on s
         self.ekf.update(z=z, HJacobian=self.Hjac, Hx=self.hx, residual=self.residual)
         self.ekf.x[0] = normalize_s(self.ekf.x[0], self.track_length)
-
-        # small smoothing buffers
+        
+        # 5) Fill small smoothing buffers
         self.vs_hist.append(self.ekf.x[1])
         self.vd_hist.append(self.ekf.x[3])
         if len(self.vs_hist) > self.smooth_len:
@@ -232,6 +237,14 @@ class OpponentTrackerNode(Node):
         self.declare_parameter('smooth_len', 5) 
         self.declare_parameter('mahalanobis_gate', 9.0) 
 
+        # --- static / dynamic classification parameters ---
+        self.declare_parameter('static_speed_thresh', 0.25)   # [m/s]    # 0.2
+        self.declare_parameter('dynamic_speed_thresh', 0.6)  # [m/s]
+        self.declare_parameter('class_min_samples', 8)       # minimum number of vs samples before classification  # 8
+        # --- max allowed speed for initializing target ---
+        self.declare_parameter('init_v_max', 6.0)     # for initialization
+        self.declare_parameter('frame_v_max', 10.0)   # for frame-to-frame update
+
         # ---- read parameters ----
         rate = float(self.get_parameter('rate').value)
         P_vs = float(self.get_parameter('P_vs').value)
@@ -256,6 +269,13 @@ class OpponentTrackerNode(Node):
         smooth_len  = int(self.get_parameter('smooth_len').value)
         self.mah_gate = float(self.get_parameter('mahalanobis_gate').value)
 
+        self.static_speed_thresh = float(self.get_parameter('static_speed_thresh').value)
+        self.dynamic_speed_thresh = float(self.get_parameter('dynamic_speed_thresh').value)
+        self.class_min_samples = int(self.get_parameter('class_min_samples').value)
+
+        self.init_v_max = float(self.get_parameter('init_v_max').value)
+        self.frame_v_max = float(self.get_parameter('frame_v_max').value)
+
         # ---- tracker ----
         self.tracker = SingleOpponentKF(rate, q_vs, q_vd, r_s, r_vs, r_d, r_vd)
         self.tracker.set_soft_pulls(P_vs, P_d, P_vd)
@@ -265,6 +285,9 @@ class OpponentTrackerNode(Node):
         self.track_length: Optional[float] = None
         self.global_wpnts: Optional[List]  = None
         self.waypoints: Optional[np.ndarray] = None 
+
+        self.class_vs_hist: List[float] = []
+        self.class_label: Optional[bool] = None
 
         # Simple target container (since single opponent)
         self.has_target = False
@@ -299,30 +322,19 @@ class OpponentTrackerNode(Node):
         self.pub_fused  = self.create_publisher(ObstacleArray, '/perception/obstacles', 10)
         self.pub_marker = self.create_publisher(MarkerArray, '/perception/static_dynamic_marker_pub', 10)
 
-        # self.pub_assoc = self.create_publisher(Marker, '/perception/ekf_associated_meas', 10)
         self.pub_raw_markers = self.create_publisher(MarkerArray, '/perception/raw_obstacles_markers', 10)
 
+        self.pub_ready = self.create_publisher(Ready, "/perception/ready", 1)
 
-        self.sub_obs = self.create_subscription(ObstacleArray, '/perception/raw_obstacles', self.cb_obstacles, qos)
+        self.sub_obs = self.create_subscription(ObstacleArray, '/perception/raw_obstacles', self.cb_obstacles, 10)
         self.sub_wp  = self.create_subscription(WaypointArray, '/global_centerline', self.cb_waypoints, qos_wp)
-        # Optional (if you need car s, not required for this simple node)
-        # self.sub_car = self.create_subscription(Odometry, '/car_state/odom_frenet',
-        #                                         self.cb_car_frenet, qos)
 
         # ---- timer ----
         self.timer = self.create_timer(1.0 / rate, self.on_timer)
 
-        # self.converter = self.init_frenet_converter()
         self.converter = None
 
         self.get_logger().info('[OpponentTracker] Node started.')
-
-    # def init_frenet_converter(self):
-    #     rospy.wait_for_message("/global_centerline", WaypointArray)
-    #     # Initialize the FrenetConverter object
-    #     converter = FrenetConverter(self.waypoints[:, 0], self.waypoints[:, 1])
-    #     self.get_logger().info("[OpponentTracker] initialized FrenetConverter object")
-    #     return converter
 
     # --------- callbacks ---------
     def cb_waypoints(self, msg):
@@ -332,17 +344,16 @@ class OpponentTrackerNode(Node):
         self.waypoints = np.array([[wp.x_m, wp.y_m] for wp in msg.wpnts])
         if len(self.global_wpnts) > 0:
             self.track_length = float(self.global_wpnts[-1].s_m)
-            self.get_logger().info(f'Track length = {self.track_length:.2f} m')
             self.tracker.set_path(self.global_wpnts, self.track_length, self.ratio_to_path)
-            self.get_logger().info(f'[OpponentTracker] Received global path. Track length = {self.track_length:.2f} m')
         self.converter = FrenetConverter(self.waypoints[:, 0], self.waypoints[:, 1])
 
         self.track_ready = True
         self.path_needs_update = False
+        out = Ready()
+        out.ready = True
+        self.pub_ready.publish(out)
+        self.get_logger().info(f'[OpponentTracker] Received global path. Track length = {self.track_length:.2f} m')
 
-    def cb_car_frenet(self, msg: Odometry):
-        # Not strictly used here, but kept for extension
-        pass
 
     def cb_obstacles(self, msg: ObstacleArray):
         """Associate the single opponent by nearest-neighbor in Frenet."""
@@ -393,7 +404,37 @@ class OpponentTrackerNode(Node):
             # Need at least two hits to initialize with a velocity
             if self.prev_s is None:
                 self.prev_s, self.prev_d = s_meas, d_meas
+                self.prev_meas_t = t_meas
                 return
+            
+            # compute init speed from two measurements and check if it is reasonable ---
+            ds_init = wrap_s_residual(s_meas - self.prev_s, self.track_length)
+            vs_init = ds_init / dt_meas  # [m/s] along the track
+
+            if abs(vs_init) > self.init_v_max:
+                # Too fast to be a real car -> likely two unrelated obstacles (e.g. walls)
+                self.get_logger().debug(
+                    f"[OpponentTracker] skip init: |v_init|={abs(vs_init):.2f} > {self.init_v_max:.2f}"
+                )
+                # Update prev_* so that next frame can still try to form a good pair
+                self.prev_s, self.prev_d = s_meas, d_meas
+                self.prev_meas_t = t_meas
+                return
+            
+            # # --- frame-to-frame raw speed check ---
+            # if self.prev_s is not None:
+            #     ds_frame = wrap_s_residual(s_meas - self.prev_s, self.track_length)
+            #     vs_frame = ds_frame / dt_meas  # [m/s] based purely on two measurements
+
+            #     if abs(vs_frame) > self.frame_v_max or vs_frame < -2.0:
+            #         # This measurement implies an unrealistically high speed -> likely jump to another object
+            #         self.get_logger().debug(
+            #             f"[OpponentTracker] skip frame: |v_frame|={abs(vs_frame):.2f} > {self.frame_v_max:.2f}"
+            #         )
+            #         # IMPORTANT: do NOT update prev_s / prev_d / prev_meas_t here,
+            #         # so that the next valid measurement is still compared to the last accepted one.
+            #         return
+            
             # Initialize EKF
             self.tracker.initialize_from_two(s_meas, self.prev_s, d_meas, self.prev_d, dt_meas)
             self.has_target = True
@@ -401,6 +442,10 @@ class OpponentTrackerNode(Node):
             self.prev_s, self.prev_d = s_meas, d_meas
             self.prev_meas_t = t_meas
             self.updated_this_cycle = True
+
+            # Reset static/dynamic classification when a new target is initialized
+            self.class_vs_hist.clear()
+            self.class_label = None
             return
         
         # self.publish_assoc_measurement(s_meas, d_meas)
@@ -411,6 +456,19 @@ class OpponentTrackerNode(Node):
         self.prev_meas_t = t_meas
         self.ttl = self.ttl_init  # refresh TTL when seen
         self.updated_this_cycle = True
+
+        # ---- feed longitudinal speed into classification buffer ----
+        vs_curr = abs(self.tracker.get_smoothed_vs())
+        self.class_vs_hist.append(vs_curr)
+
+        # Limit buffer length so it does not grow unbounded
+        max_class_len = max(self.class_min_samples * 2, 20)
+        if len(self.class_vs_hist) > max_class_len:
+            self.class_vs_hist.pop(0)
+
+        # Try to update static/dynamic classification
+        self.update_classification()
+
 
     # --------- main loop ---------
     def on_timer(self):
@@ -433,6 +491,11 @@ class OpponentTrackerNode(Node):
                 self.has_target = False
                 self.prev_s = None
                 self.prev_d = None
+
+                # Reset classification state when the target is lost
+                self.class_vs_hist.clear()
+                self.class_label = None
+
                 # When lost, optionally keep predicting with path speed
                 self.tracker.use_target_vel = bool(self.use_target_when_lost)
         else:
@@ -478,7 +541,38 @@ class OpponentTrackerNode(Node):
 
         d2 = float(y.T @ S_inv @ y)
         return d2
+    
+    def update_classification(self):
+        """Update static/dynamic classification based on recent |vs| history.
 
+        class_label:
+            None  -> not enough data yet
+            True  -> static (avg speed below static_speed_thresh)
+            False -> dynamic (avg speed above dynamic_speed_thresh)
+        """
+        # Not enough samples yet
+        if len(self.class_vs_hist) < self.class_min_samples:
+            return
+
+        avg_speed = float(np.mean(self.class_vs_hist))
+
+        # If we do not have a label yet, decide once based on static threshold
+        if self.class_label is None:
+            # If the average speed is very small, we consider it static; otherwise dynamic
+            self.class_label = (avg_speed < self.static_speed_thresh)
+            return
+
+        # Use hysteresis to avoid oscillations:
+        #   static -> dynamic only if avg_speed clearly above dynamic_speed_thresh
+        #   dynamic -> static only if avg_speed clearly below static_speed_thresh
+        if self.class_label is True:
+            # currently static
+            if avg_speed > self.dynamic_speed_thresh:
+                self.class_label = False
+        else:
+            # currently dynamic
+            if avg_speed < self.static_speed_thresh:
+                self.class_label = True
 
     # --------- publishers ---------
     def publish_marker(self):
@@ -502,9 +596,15 @@ class OpponentTrackerNode(Node):
         m.scale.y = 0.5
         m.scale.z = 0.5
         m.color.a = 1.0 # 0.8
-        m.color.r = 1.0 # if self.has_target else 1.0
-        m.color.g = 0.0 # if self.has_target else 0.3
-        m.color.b = 0.0 # if self.has_target else 0.8
+        # m.color.r = 1.0 # if self.has_target else 1.0
+        # m.color.g = 0.0 # if self.has_target else 0.3
+        # m.color.b = 0.0 # if self.has_target else 0.8
+        if self.class_label is False:          # dynamic: red
+            m.color.r = 1.0; m.color.g = 0.0; m.color.b = 0.0   
+        elif self.class_label is True:         # static: blue
+            m.color.r = 0.0; m.color.g = 0.0; m.color.b = 1.0   
+        else:                                  # unknown: yellow
+            m.color.r = 1.0; m.color.g = 1.0; m.color.b = 0.0   
 
         # Convert Frenet (s,d) to map (x,y) only if you have a converter.
         # Here we just place a sphere along s on x-axis as a placeholder.
@@ -522,6 +622,9 @@ class OpponentTrackerNode(Node):
             return
         # Only publish if covariance on s is reasonably bounded
         if self.tracker.ekf.P[0, 0] > self.var_pub_max:
+            return
+        if self.class_label is not False:
+            self.get_logger().info('[OpponentTracker] Not publishing obstacle: classified as static or unknown.')
             return
         oa = ObstacleArray()
         oa.header.frame_id = 'map'
@@ -567,39 +670,6 @@ class OpponentTrackerNode(Node):
         # self.log_csv_file.flush()
         # self.get_logger().info(f's={o.s_center:.2f} d={o.d_center:.2f} vs={o.vs:.2f} vd={o.vd:.2f}')
 
-    # def publish_assoc_measurement(self, s_meas: float, d_meas: float):
-    #     """Visualize the raw detection that EKF associated to (s_meas, d_meas)."""
-    #     if self.converter is None or self.track_length is None:
-    #         return
-
-    #     # Convert Frenet (s,d) back to map (x,y)
-    #     x, y = self.converter.get_cartesian(float(s_meas), float(d_meas))
-
-    #     m = Marker()
-    #     m.header.frame_id = 'map'
-    #     m.header.stamp = self.get_clock().now().to_msg()
-    #     m.ns = 'ekf_association'
-    #     m.id = 1
-    #     m.type = Marker.SPHERE
-    #     m.action = Marker.ADD
-    #     m.pose.position.x = float(x)
-    #     m.pose.position.y = float(y)
-    #     m.pose.position.z = 0.15
-    #     m.pose.orientation.w = 1.0
-    #     m.scale.x = 0.3
-    #     m.scale.y = 0.3
-    #     m.scale.z = 0.3
-    #     m.color.a = 0.7
-    #     m.color.r = 0.0
-    #     m.color.g = 0.0
-    #     m.color.b = 1.0     # 蓝色点：表示“被 EKF 选中的量测”
-
-    #     # lifetime 短一点，方便看动态更新
-    #     from builtin_interfaces.msg import Duration as DurationMsg
-    #     m.lifetime = DurationMsg(sec=0, nanosec=int(0.1 * 1e9))
-
-    #     self.pub_assoc.publish(m)
-
     def publish_raw_obstacles_markers(self, msg: ObstacleArray):
         """Visualize all raw obstacles received by the tracker."""
         if self.converter is None or self.track_length is None:
@@ -607,7 +677,6 @@ class OpponentTrackerNode(Node):
 
         ma = MarkerArray()
 
-        # 先清空这个 namespace 下的 marker
         clr = Marker()
         clr.header.frame_id = 'map'
         clr.header.stamp = self.get_clock().now().to_msg()
@@ -624,7 +693,7 @@ class OpponentTrackerNode(Node):
             m = Marker()
             m.header.frame_id = 'map'
             m.header.stamp = msg.header.stamp
-            m.ns = 'raw_obstacles'      # 和 ekf_association / ekf_estimate 区分开
+            m.ns = 'raw_obstacles'    
             m.id = i
             m.type = Marker.SPHERE
             m.action = Marker.ADD
@@ -636,7 +705,7 @@ class OpponentTrackerNode(Node):
             m.scale.y = 0.2
             m.scale.z = 0.2
             m.color.a = 0.9
-            m.color.r = 1.0   # 生一点的颜色，表示“raw detection”
+            m.color.r = 1.0 
             m.color.g = 0.5
             m.color.b = 0.0
             m.lifetime = DurationMsg(sec=0, nanosec=int(0.1 * 1e9))
