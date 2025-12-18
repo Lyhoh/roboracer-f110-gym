@@ -954,7 +954,7 @@ class Detect(Node):
         # --- 2) Cluster in base_link ---
         clusters = self.adaptive_breakpoint_clustering(pts_bl, self.scan.angle_increment)
 
-        # --- 3) For each cluster, compute its midpoint in base_link,
+        # --- 3) For each cluster, compute its representative point in base_link,
         #         transform that single point to map at scan_t,
         #         compute (s,d) via Frenet, and filter by track boundary ---
         kept_clusters_bl = []
@@ -980,30 +980,7 @@ class Detect(Node):
             H_map_bl = self._H_from_tf(tf_map_from_bl)
             yaw_map_from_bl = self._quat_to_yaw(tf_map_from_bl.transform.rotation)
 
-        # for c in clusters:
-        #     if c.shape[0] < self.min_obs_size:
-        #         continue
-        #     mid_bl = c[c.shape[0]//2]               # midpoint in base_link
-        #     # dists = np.linalg.norm(c, axis=1)
-        #     # mid_bl = c[np.argmin(dists)]   # 用 cluster 最靠近 ego 的点
-
-        #     mid_map = self._transform_xy(mid_bl.reshape(1,2), H_map_bl)[0]  # 1x2 -> 2
-        #     # Frenet from map XY
-        #     s_arr, d_arr = self.converter.get_frenet(
-        #         np.atleast_1d(mid_map[0]).astype(np.float64),
-        #         np.atleast_1d(mid_map[1]).astype(np.float64)
-        #     )
-        #     s, d = float(s_arr[0]), float(d_arr[0])
-
-        #     if self.is_track_boundary(s, d):
-        #         continue
-
-        #     kept_clusters_bl.append(c)
-        #     mids_map.append((mid_map[0], mid_map[1]))
-        #     mids_sd.append((s, d))
-
         for c in clusters:
-            # 1) 太小的簇直接跳过
             if c.shape[0] < self.min_obs_size:
                 continue
 
@@ -1015,7 +992,8 @@ class Detect(Node):
             s_c = s_c.astype(np.float64)
             d_c = d_c.astype(np.float64)
 
-            idx_best = int(np.argmax(np.abs(d_c)))
+            # idx_best = int(np.argmax(np.abs(d_c)))
+            idx_best = int(np.argmin(np.abs(d_c)))
             s_best = float(s_c[idx_best])
             d_best = float(d_c[idx_best])
             best_map = pts_map_c[idx_best]                   # (x, y) in map
@@ -1024,14 +1002,18 @@ class Detect(Node):
             filtered_as_wall = False
 
             # --- Static map subtraction: skip clusters lying on precomputed walls ---
-            if self.is_static_background(s_best, d_best):
-                filtered_as_wall = True
+            if self.use_static_map:
+                if self.is_static_background(s_best, d_best):
+                    filtered_as_wall = True
+                    
+                # --- Track boundary check: skip clusters outside track boundaries ---
+                elif self.is_track_boundary(s_best, d_best):
+                    filtered_as_wall = True
+            else:
+                if self.is_track_boundary(s_best, d_best):
+                    filtered_as_wall = True
+                # pass
                 
-            # --- Track boundary check: skip clusters outside track boundaries ---
-            elif self.is_track_boundary(s_best, d_best):
-                filtered_as_wall = True
-                
-            # # debug log BEFORE continue
             # self.debug_cls_s.append(s_best)
             # self.debug_cls_d.append(d_best)
             # self.debug_cls_kept.append(0 if filtered_as_wall else 1)
@@ -1039,19 +1021,16 @@ class Detect(Node):
             # self.debug_cls_y.append(float(best_map[1]))
 
             if not filtered_as_wall:
-                # 1) 这个障碍点的真实 map 坐标
                 self.debug_cls_s.append(s_best)
                 self.debug_cls_d.append(d_best)
                 self.debug_cls_x.append(float(best_map[0]))
                 self.debug_cls_y.append(float(best_map[1]))
                 self.debug_cls_kept.append(1)
 
-                # 2) 同 s_best 的 centerline 点
                 x_center, y_center = self.converter.get_cartesian(s_best, 0.0)
                 self.debug_map_center_x.append(float(x_center))
                 self.debug_map_center_y.append(float(y_center))
 
-                # 3) track boundary（几何墙）
                 idx_tr = bisect_left(self.s_array, s_best)
                 if idx_tr:
                     idx_tr -= 1
@@ -1066,7 +1045,6 @@ class Detect(Node):
                 self.debug_map_geomwall_x.append(float(x_geom))
                 self.debug_map_geomwall_y.append(float(y_geom))
 
-                # 4) static map 墙
                 x_static = float('nan')
                 y_static = float('nan')
                 if (self.use_static_map and

@@ -64,9 +64,37 @@ def compute_waypoints_psi(x: np.ndarray, y: np.ndarray) -> np.ndarray:
 
     return psi
 
+def compute_curvature_from_xy(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """
+    Compute curvature kappa along a 2D parametric curve using finite differences:
+      kappa = (x' y'' - y' x'') / ( (x'^2 + y'^2)^(3/2) )
+    Output has same length as x,y.
+    """
+    dx  = np.gradient(x, edge_order=2)
+    dy  = np.gradient(y, edge_order=2)
+    ddx = np.gradient(dx, edge_order=2)
+    ddy = np.gradient(dy, edge_order=2)
+
+    denom = (dx*dx + dy*dy)**1.5 + 1e-12
+    kappa = (dx * ddy - dy * ddx) / denom
+    return kappa
+
+def unwrap_time(t: np.ndarray) -> np.ndarray:
+    """Shift time to start at 0 for nicer plots."""
+    return t - t[0]
+
+def interp_kappa_at_time(fc, s_true_list, kappa_s, s_wp):
+    """
+    Build kappa(t) by mapping s(t) -> kappa(s) with interpolation.
+    - s_true_list: list/array of s(t) (prefer GT s_true for stability)
+    - s_wp: waypoint s grid, must be monotonic over [0, L]
+    """
+    s_t = np.asarray(s_true_list, dtype=float) % float(fc.raceline_length)
+    return np.interp(s_t, s_wp, kappa_s)
+
 
 class EkfVsGtMonitor(Node):
-    def __init__(self):
+    def __init__(self, track_name, v_cmd_const):
         super().__init__('ekf_vs_gt_monitor')
 
         # --- Config (edit if needed) ---
@@ -90,6 +118,9 @@ class EkfVsGtMonitor(Node):
         self.fc: Optional[FrenetConverter] = None
         self.track_length: float = 0.0
         self.centerline_xy = None
+        
+        self.track_ready = False
+        self.path_needs_update = True 
 
         self.gt_buf: deque[Odometry] = deque(maxlen=200)
 
@@ -120,6 +151,11 @@ class EkfVsGtMonitor(Node):
         self.log_vd_true = []
         self.log_vd_est  = []
 
+        self.track_name = track_name
+        self.v_cmd_const = float(v_cmd_const)
+        self.save_dir = "/home/lyh/ros2_ws/src/f110_gym/perception/results/"
+        self.save_name_suf = track_name + '_' + str(v_cmd_const).replace('.','_')
+
 
         # --- detection (raw) subscription ---
         self.sub_det = self.create_subscription(
@@ -136,27 +172,32 @@ class EkfVsGtMonitor(Node):
         self.log_det_es = []        # detection - tracking e_s (wrapped)
         self.log_det_ed = []        # detection - tracking e_d
 
+        self.s_wp = None
+        self.kappa_s = None
 
         self.get_logger().info('[EkfVsGtMonitor] node started.')
 
     # ---------- Waypoints → FrenetConverter ----------
     def cb_wp(self, msg: WaypointArray):
+        if self.track_ready and not self.path_needs_update:
+            return
         if not msg.wpnts:
             return
 
         x = np.array([w.x_m for w in msg.wpnts], dtype=float)
         y = np.array([w.y_m for w in msg.wpnts], dtype=float)
 
-        # Optional: psi per waypoint, if present in your message; else keep None
         # try:
         #     psi = np.array([w.psi_rad for w in msg.wpnts], dtype=float)  # adjust field name if you have it
         # except Exception:
-        #     psi = None
+        #     psi = compute_waypoints_psi(x, y)
         psi = compute_waypoints_psi(x, y)
 
         self.fc = FrenetConverter(waypoints_x=x, waypoints_y=y, waypoints_psi=psi)
         self.track_length = float(self.fc.raceline_length)
         self.get_logger().info(f'[Monitor] FrenetConverter ready. L={self.track_length:.2f} m.')
+        self.track_ready = True
+        self.path_needs_update = False
 
         # --- directly cache the centerline from waypoints ---
         try:
@@ -165,6 +206,27 @@ class EkfVsGtMonitor(Node):
         except Exception as e:
             self.centerline_xy = None
             self.get_logger().warn(f"[Monitor] Failed to cache centerline: {e}")
+
+        # 1) Build an s-grid for the cached centerline points (0..L)
+        try:
+            s_wp = np.array([w.s_m for w in msg.wpnts], dtype=float)
+        except Exception:
+            # Fallback: approximate cumulative arc length
+            # pts = self.centerline_xy
+            # ds = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+            # s_wp = np.concatenate([[0.0], np.cumsum(ds)])
+            # # normalize to track length if needed
+            # if s_wp[-1] > 1e-6:
+            #     s_wp *= float(self.fc.raceline_length) / s_wp[-1]
+            pass
+
+        # 2) Curvature along the centerline
+        kappa_s = compute_curvature_from_xy(self.centerline_xy[:, 0], self.centerline_xy[:, 1])
+
+        # 3) Store for plotting
+        self.s_wp = s_wp
+        self.kappa_s = kappa_s
+
 
 
     def cb_det(self, msg: ObstacleArray):
@@ -230,7 +292,7 @@ class EkfVsGtMonitor(Node):
 
         msg_cart = Float32MultiArray()
         msg_cart.data = [float(ex), float(ey), float(dist)]
-        self.pub_err_cart.publish(msg_cart)
+        # self.pub_err_cart.publish(msg_cart)
 
         # --- Frenet GT using converter: (x_gt, y_gt) → (s_true, d_true)
         # converter expects arrays; get_frenet returns [s, d] arrays
@@ -276,7 +338,7 @@ class EkfVsGtMonitor(Node):
 
         msg_fren = Float32MultiArray()
         msg_fren.data = [float(e_s), float(e_vs), float(e_d), float(e_vd)]
-        self.pub_err_fren.publish(msg_fren)
+        # self.pub_err_fren.publish(msg_fren)
 
         # rolling metrics
         self.n += 1
@@ -361,327 +423,339 @@ class EkfVsGtMonitor(Node):
             # keep vector lengths aligned if you prefer; or just skip
             pass
 
+    def show_main_3panel(self,
+                        spike_percentile: float = 95.0,
+                        kappa_percentile: float = 85.0,
+                        shade_high_kappa: bool = True):
+        """
+        Main evaluation figure (3 stacked subplots, shared x):
+        1) Cartesian distance error |e_xy|
+        2) EKF v_s estimate vs commanded speed (constant)
+        3) Track curvature magnitude |kappa|(t) aligned via s_true(t)
 
-    def show_figure(self):
-        """Show a single figure with multiple subplots (no saving)."""
+        Assumes these buffers exist:
+        self.log_t, self.log_dist, self.log_vs_est, self.log_s_true
+        and curvature cache:
+        self.s_wp, self.kappa_s, self.track_length
+        """
+
+        # ---------- Guards ----------
         if len(self.log_t) == 0:
-            self.get_logger().warn("No samples collected; nothing to display.")
+            self.get_logger().warn("No samples collected; cannot plot.")
+            return
+        if self.s_wp is None or self.kappa_s is None:
+            self.get_logger().warn("Curvature not ready (missing waypoints / kappa cache).")
             return
 
-        t   = np.array(self.log_t)
-        es  = np.array(self.log_es)
-        evs = np.array(self.log_evs)
-        ed  = np.array(self.log_ed)
-        evd = np.array(self.log_evd)
-        dist= np.array(self.log_dist)
-        xy_ref = np.array(self.log_xy_ref)  # shape (N, 2)
-        xy_est = np.array(self.log_xy_est)  # shape (N, 2)
+        # ---------- Arrays ----------
+        t = np.asarray(self.log_t, dtype=float)
+        t = t - t[0]  # start at 0 for readability
 
-        # Optional: downsample for lighter plotting if very long
+        dist = np.asarray(self.log_dist, dtype=float)
+        vs_est = np.asarray(self.log_vs_est, dtype=float)
+        s_true = np.asarray(self.log_s_true, dtype=float) % float(self.track_length)
+
+        # Downsample for speed (plotting only)
         step = max(1, len(t) // 4000)
-        t, es, evs, ed, evd, dist = t[::step], es[::step], evs[::step], ed[::step], evd[::step], dist[::step]
-        xy_ref = xy_ref[::step]
-        xy_est = xy_est[::step]
+        t_p = t[::step]
+        dist_p = dist[::step]
+        vs_est_p = vs_est[::step]
+        s_true_p = s_true[::step]
 
-        # Build a 2x3 grid: (e_s, e_vs, e_d) / (e_vd, cart_dist, XY track)
-        fig = plt.figure(figsize=(14, 8), constrained_layout=True)
-        gs = fig.add_gridspec(2, 3)
-        # fig = plt.figure(figsize=(15, 8), constrained_layout=True)
-        # gs = fig.add_gridspec(2, 3, height_ratios=[1, 1.2])  
+        # ---------- Curvature aligned to time ----------
+        # kappa(s) from waypoints -> kappa(t) via s_true(t)
+        kappa_t = np.interp(s_true_p, self.s_wp, self.kappa_s)
+        kappa_abs = np.abs(kappa_t)
 
-        ax_es  = fig.add_subplot(gs[0, 0])
-        ax_evs = fig.add_subplot(gs[0, 1])
-        ax_ed  = fig.add_subplot(gs[0, 2])
-        ax_evd = fig.add_subplot(gs[1, 0])
-        ax_dst = fig.add_subplot(gs[1, 1])
-        # ax_xy  = fig.add_subplot(gs[1, 2])
+        # ---------- Spike highlight on distance error ----------
+        finite_dist = dist_p[np.isfinite(dist_p)]
+        if len(finite_dist) > 0:
+            spike_th = float(np.percentile(finite_dist, spike_percentile))
+        else:
+            spike_th = float("nan")
+        spike_mask = np.isfinite(dist_p) & (dist_p >= spike_th)
 
-        # e_s (wrapped)
-        ax_es.plot(t, es)
-        ax_es.set_title("e_s (wrapped)")
-        ax_es.set_xlabel("time [s]")
-        ax_es.set_ylabel("m")
+        # ---------- High-curvature shading (optional) ----------
+        finite_k = kappa_abs[np.isfinite(kappa_abs)]
+        if len(finite_k) > 0:
+            kappa_th = float(np.percentile(finite_k, kappa_percentile))
+        else:
+            kappa_th = float("nan")
+        high_kappa = np.isfinite(kappa_abs) & (kappa_abs >= kappa_th)
 
-        # e_vs
-        ax_evs.plot(t, evs)
-        ax_evs.set_title("e_vs")
-        ax_evs.set_xlabel("time [s]")
-        ax_evs.set_ylabel("m/s")
+        def shade_regions(ax, x, mask, alpha=0.12):
+            """Shade contiguous True regions in mask along x."""
+            if not np.any(mask):
+                return
+            idx = np.where(mask)[0]
+            # find contiguous blocks
+            blocks = np.split(idx, np.where(np.diff(idx) != 1)[0] + 1)
+            for b in blocks:
+                ax.axvspan(x[b[0]], x[b[-1]], alpha=alpha)
 
-        # e_d
-        ax_ed.plot(t, ed)
-        ax_ed.set_title("e_d")
-        ax_ed.set_xlabel("time [s]")
-        ax_ed.set_ylabel("m")
+        # ---------- Plot ----------
+        fig, axes = plt.subplots(3, 1, figsize=(14, 7.8), sharex=True, constrained_layout=True)
 
-        # e_vd
-        ax_evd.plot(t, evd)
-        ax_evd.set_title("e_vd")
-        ax_evd.set_xlabel("time [s]")
-        ax_evd.set_ylabel("m/s")
+        # (1) Cartesian distance error
+        ax1 = axes[0]
+        ax1.plot(t_p, dist_p, label="Cartesian distance error |e_xy|")
+        if np.any(spike_mask):
+            ax1.scatter(t_p[spike_mask], dist_p[spike_mask], s=12,
+                        label=f"Spikes (≥ P{int(spike_percentile)} = {spike_th:.2f} m)")
+        if shade_high_kappa and np.isfinite(kappa_th):
+            shade_regions(ax1, t_p, high_kappa, alpha=0.10)
+        ax1.set_ylabel("Error [m]")
+        ax1.grid(True, alpha=0.3)
+        ax1.legend(loc="upper right")
 
-        # Cartesian distance
-        ax_dst.plot(t, dist)
-        ax_dst.set_title("Cartesian distance error")
-        ax_dst.set_xlabel("time [s]")
-        ax_dst.set_ylabel("m")
+        # (2) v_s estimate vs commanded speed (constant)
+        ax2 = axes[1]
+        ax2.plot(t_p, vs_est_p, label="Estimated v_s (EKF)")
+        ax2.plot(t_p, np.full_like(t_p, float(self.v_cmd_const)), linestyle="--",
+                label=f"Commanded speed v_cmd = {self.v_cmd_const:.2f} m/s")
+        if shade_high_kappa and np.isfinite(kappa_th):
+            shade_regions(ax2, t_p, high_kappa, alpha=0.10)
+        ax2.set_ylabel("Speed [m/s]")
+        ax2.grid(True, alpha=0.3)
+        ax2.legend(loc="upper right")
 
-        # # XY overlay (reference vs estimate)
-        # ax_xy.plot(xy_ref[:,0], xy_ref[:,1], lw=1, label="GT XY")
-        # ax_xy.plot(xy_est[:,0], xy_est[:,1], lw=1, label="EKF XY")
-        # ax_xy.set_title("Track (XY) overlay")
-        # ax_xy.set_xlabel("x [m]")
-        # ax_xy.set_ylabel("y [m]")
-        # ax_xy.axis("equal")
-        # ax_xy.legend(loc="best")
+        # (3) curvature magnitude
+        ax3 = axes[2]
+        ax3.plot(t_p, kappa_abs, label="|curvature| |κ(t)|")
 
-        # --- (ex, ey) scatter ---
-        ex = np.array(self.log_ex)[::step]
-        ey = np.array(self.log_ey)[::step]
-        mask = np.isfinite(ex) & np.isfinite(ey)
-        ex, ey = ex[mask], ey[mask]
+        if shade_high_kappa and np.isfinite(kappa_th):
+            shade_regions(ax3, t_p, high_kappa, alpha=0.10)
+            
+        ax3.axhline(kappa_th, linestyle="--",
+                    label=f"High-curvature threshold (P{int(kappa_percentile)})")
+        ax3.set_ylabel("|κ| [1/m]")
+        ax3.set_xlabel("Time [s]")
+        ax3.grid(True, alpha=0.3)
+        ax3.legend(loc="upper right")
 
-        ax_xy = fig.add_subplot(gs[1, 2])
-        # ax_xy = fig.add_subplot(gs[1, 1:3]) 
-
-        hb = ax_xy.hexbin(ex, ey, gridsize=40, cmap='Blues', bins='log', mincnt=1)
-        cb = fig.colorbar(hb, ax=ax_xy)
-        cb.set_label('count (log scale)')
-
-        mx, my = ex.mean(), ey.mean()
-        cov = np.cov(np.vstack([ex, ey]))
-        vals, vecs = np.linalg.eigh(cov)
-        t = np.linspace(0, 2*np.pi, 256)
-        ell = vecs @ (np.sqrt(vals)[:,None] * np.vstack([np.cos(t), np.sin(t)]))
-        ax_xy.plot(ell[0] + mx, ell[1] + my, 'r--', lw=2.0, label="1σ ellipse")
-        ax_xy.scatter([mx], [my], marker='x', s=90, color='r', label='mean')
-
-        xlo, xhi = np.percentile(ex, [1, 99])
-        ylo, yhi = np.percentile(ey, [1, 99])
-        padx = 0.5 * max(abs(xlo), abs(xhi))
-        pady = 0.15 * max(abs(ylo), abs(yhi))
-        ax_xy.set_xlim(xlo - padx, xhi + padx)
-        ax_xy.set_ylim(ylo - pady, yhi + pady)
-        # xlo, xhi = np.percentile(ex, [1, 99]); ylo, yhi = np.percentile(ey, [1, 99])
-        # padx = 0.15*max(abs(xlo), abs(xhi)); pady = 0.15*max(abs(ylo), abs(yhi))
-        # ax_xy.set_xlim(xlo-padx, xhi+padx); ax_xy.set_ylim(ylo-pady, yhi+pady)
-        # ax_xy.set_aspect('equal', 'box')
-        ax_xy.grid(True, alpha=0.25)
-        ax_xy.set_title("Cartesian Error Density (hexbin)")
-        ax_xy.set_xlabel("Error X [m]"); ax_xy.set_ylabel("Error Y [m]")
-        ax_xy.legend(loc="best")
-
-
-        # ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        # fname = f"ekf_eval_{ts}.png"
-        fname = "ekf_vs_gt_monitor_error.png"
-        path = os.path.join('/home/lyh/ros2_ws/src/f110_gym/perception/results/', fname)
-        fig.savefig(path, dpi=150, bbox_inches="tight")
-        self.get_logger().info(f"Saved summary figure: {path}")
-
-        # plt.show()
-        plt.show(block=False)
-        plt.pause(0.1)  
-
-    def show_compare_figure(self):
-        """Show second big figure: GT vs EKF (s, d, vs, vd) + X/Y coordinate comparison + track overlay."""
-        if len(self.log_t) == 0 or len(self.log_s_true) == 0:
-            self.get_logger().warn("No samples collected for comparison; nothing to display.")
-            return
-
-        t = np.array(self.log_t)
-        s_true = np.array(self.log_s_true); s_est = np.array(self.log_s_est)
-        d_true = np.array(self.log_d_true); d_est = np.array(self.log_d_est)
-        vs_true = np.array(self.log_vs_true); vs_est = np.array(self.log_vs_est)
-        vd_true = np.array(self.log_vd_true); vd_est = np.array(self.log_vd_est)
-
-        # XY coordinates and dist
-        xy_ref = np.array(self.log_xy_ref)  # GT
-        xy_est = np.array(self.log_xy_est)  # EKF
-
-        # Downsample if needed
-        step = max(1, len(t)//4000)
-        t = t[::step]
-        s_true, s_est = s_true[::step], s_est[::step]
-        d_true, d_est = d_true[::step], d_est[::step]
-        vs_true, vs_est = vs_true[::step], vs_est[::step]
-        vd_true, vd_est = vd_true[::step], vd_est[::step]
-        xy_ref = xy_ref[::step]; xy_est = xy_est[::step]
-
-        # --- Figure layout: 3x2 ---
-        fig = plt.figure(figsize=(14, 10), constrained_layout=True)
-        gs = fig.add_gridspec(3, 2)
-
-        ax_s   = fig.add_subplot(gs[0, 0])
-        ax_d   = fig.add_subplot(gs[0, 1])
-        ax_vs  = fig.add_subplot(gs[1, 0])
-        ax_vd  = fig.add_subplot(gs[1, 1])
-        ax_xyc = fig.add_subplot(gs[2, 0])  # now X/Y coordinate comparison
-        ax_xy  = fig.add_subplot(gs[2, 1])  # track overlay (unchanged)
-
-        # --- s comparison ---
-        ax_s.plot(t, s_true, label="GT s")
-        ax_s.plot(t, s_est,  label="EKF s", alpha=0.9)
-        ax_s.set(title="s comparison", xlabel="time [s]", ylabel="s [m]")
-        ax_s.legend(loc="best")
-
-        # --- d comparison ---
-        ax_d.plot(t, d_true, label="GT d")
-        ax_d.plot(t, d_est,  label="EKF d", alpha=0.9)
-        ax_d.set(title="d comparison", xlabel="time [s]", ylabel="d [m]")
-        ax_d.legend(loc="best")
-
-        # --- vs comparison ---
-        ax_vs.plot(t, vs_true, label="GT vs")
-        ax_vs.plot(t, vs_est,  label="EKF vs", alpha=0.9)
-        ax_vs.set(title="vs comparison", xlabel="time [s]", ylabel="m/s")
-        ax_vs.legend(loc="best")
-
-        # --- vd comparison ---
-        ax_vd.plot(t, vd_true, label="GT vd")
-        ax_vd.plot(t, vd_est,  label="EKF vd", alpha=0.9)
-        ax_vd.set(title="vd comparison", xlabel="time [s]", ylabel="m/s")
-        ax_vd.legend(loc="best")
-
-        # --- X/Y coordinate comparison (time series) ---
-        x_gt, y_gt = xy_ref[:, 0], xy_ref[:, 1]
-        x_est, y_est = xy_est[:, 0], xy_est[:, 1]
-
-        ax_xyc.plot(t, x_gt, color="tab:blue", linestyle="-",  label="GT x")
-        ax_xyc.plot(t, x_est, color="tab:blue", linestyle="--", label="EKF x")
-        ax_xyc.plot(t, y_gt, color="tab:orange", linestyle="-",  label="GT y")
-        ax_xyc.plot(t, y_est, color="tab:orange", linestyle="--", label="EKF y")
-        ax_xyc.set(title="Cartesian coordinates comparison (x,y)",
-                xlabel="time [s]", ylabel="[m]")
-        ax_xyc.legend(loc="best")
-
-        # --- Track overlay (GT vs EKF) ---
-        ax_xy.plot(xy_ref[:, 0], xy_ref[:, 1], lw=1, label="GT XY")
-        ax_xy.plot(xy_est[:, 0], xy_est[:, 1], lw=1, label="EKF XY")
-        ax_xy.set(title="Track overlay (GT vs EKF)", xlabel="x [m]", ylabel="y [m]")
-        ax_xy.axis("equal")
-        ax_xy.legend(loc="best")
+        # Title (optional)
+        fig.suptitle("Perception Evaluation: Position Error, Speed Estimate, and Track Curvature", y=1.02)
 
         # Save
-        save_dir = '/home/lyh/ros2_ws/src/f110_gym/perception/results/'
-        os.makedirs(save_dir, exist_ok=True)
-        fname = "ekf_vs_gt_monitor_compare.png"
-        fig.savefig(os.path.join(save_dir, fname), dpi=150, bbox_inches="tight")
-        self.get_logger().info(f"Saved comparison figure: {os.path.join(save_dir, fname)}")
-        
-        # plt.show()
+        os.makedirs(self.save_dir, exist_ok=True)
+        out_path = os.path.join(self.save_dir, "final_main_3panel_" + self.save_name_suf + ".png")
+        fig.savefig(out_path, dpi=150, bbox_inches="tight")
+        self.get_logger().info(f"Saved main 3-panel figure: {out_path}")
+
         plt.show(block=False)
         plt.pause(0.1)
 
-    def show_det_vs_trk_figure(self):
-        """Show/save a figure comparing Detection vs Tracking in XY and Frenet."""
-        if len(self.log_det_dist) == 0:
-            self.get_logger().warn("No detection samples to compare; nothing to display.")
+
+    def show_hexbin_95ellipse(self):
+
+        ex = np.asarray(self.log_ex, dtype=float)
+        ey = np.asarray(self.log_ey, dtype=float)
+        mask = np.isfinite(ex) & np.isfinite(ey)
+        ex = ex[mask]; ey = ey[mask]
+        if len(ex) < 10:
+            self.get_logger().warn("Not enough samples for hexbin.")
             return
 
-        t = np.array(self.log_t)
-        # Make sure all arrays have same length (guard for occasional missing det frames)
-        n = min(len(t),
-                len(self.log_det_dist),
-                len(self.log_det_es), len(self.log_det_ed),
-                len(self.log_xy_est), len(self.log_xy_det))
-        t = t[:n]
-        det_dist = np.array(self.log_det_dist[:n])
-        e_s_dt   = np.array(self.log_det_es[:n])
-        e_d_dt   = np.array(self.log_det_ed[:n])
+        fig, ax = plt.subplots(1, 1, figsize=(7, 6), constrained_layout=True)
+        hb = ax.hexbin(ex, ey, gridsize=45, cmap="Blues", bins="log", mincnt=1)
+        cb = fig.colorbar(hb, ax=ax)
+        cb.set_label("count (log scale)")
 
-        xy_trk = np.array(self.log_xy_est[:n])
-        xy_det = np.array(self.log_xy_det[:n])
+        mx, my = float(ex.mean()), float(ey.mean())
+        cov = np.cov(np.vstack([ex, ey]))
+        vals, vecs = np.linalg.eigh(cov)
 
-        # light downsample if long
-        step = max(1, len(t)//4000)
-        t, det_dist, e_s_dt, e_d_dt = t[::step], det_dist[::step], e_s_dt[::step], e_d_dt[::step]
-        xy_trk, xy_det = xy_trk[::step], xy_det[::step]
+        # 95% confidence ellipse for 2D Gaussian:
+        # scale = sqrt(chi2.ppf(0.95, df=2)) ≈ 2.4477
+        scale = 2.4477
 
-        fig = plt.figure(figsize=(14, 6), constrained_layout=True)
-        gs = fig.add_gridspec(1, 2)
+        theta = np.linspace(0, 2*np.pi, 256)
+        circle = np.vstack([np.cos(theta), np.sin(theta)])
+        ell = vecs @ (scale * np.sqrt(vals)[:, None] * circle)
 
-        # Left: time series (distance + Frenet residuals)
-        ax_ts = fig.add_subplot(gs[0, 0])
-        ax_ts.plot(t, det_dist, label="|det - trk| in XY [m]")
-        ax_ts.plot(t, e_s_dt,  label="e_s (det - trk) [m]")
-        ax_ts.plot(t, e_d_dt,  label="e_d (det - trk) [m]")
-        ax_ts.set_title("Detection vs Tracking (time series)")
-        ax_ts.set_xlabel("time [s]")
-        ax_ts.legend(loc="best")
-        ax_ts.grid(True, alpha=0.3)
+        ax.plot(ell[0] + mx, ell[1] + my, "r--", lw=2.0, label="95% ellipse")
+        ax.scatter([mx], [my], marker="x", s=90, color="r", label="mean")
 
-        # Right: XY overlay of detection vs tracking (+GT)
-        ax_xy = fig.add_subplot(gs[0, 1])
+        ax.set_title("Cartesian Error Density (hexbin)")
+        ax.set_xlabel("Error X [m]")
+        ax.set_ylabel("Error Y [m]")
+        ax.grid(True, alpha=0.25)
+        ax.legend(loc="best")
 
-        # Tracking (EKF)
-        ax_xy.plot(xy_trk[:, 0], xy_trk[:, 1], lw=1.2, color='tab:blue', label="Tracking (EKF)")
+        fig.savefig(os.path.join(self.save_dir, "final_hexbin_95ellipse_" + self.save_name_suf + ".png"), dpi=150, bbox_inches="tight")
+        self.get_logger().info(f"Saved: {os.path.join(self.save_dir, 'final_hexbin_95ellipse_' + self.save_name_suf + '.png')}")
 
-        # Detection (raw)
-        ax_xy.plot(xy_det[:, 0], xy_det[:, 1], lw=1.0, color='tab:orange', label="Detection (raw)")
+    def show_track_overlay(self, downsample_max_points: int = 4000):
+        """
+        Plot GT vs EKF track overlay in XY.
+        Uses self.log_xy_ref and self.log_xy_est (already logged in cb_ekf).
+        """
+        import os
+        import numpy as np
+        import matplotlib.pyplot as plt
 
-        # Ground truth (GT) — use the same downsample as others
-        xy_gt = np.array(self.log_xy_ref[:n])[::step]
-        ax_xy.plot(xy_gt[:, 0], xy_gt[:, 1], lw=1.2, color='tab:green', label="Ground Truth")
+        if len(self.log_xy_ref) == 0 or len(self.log_xy_est) == 0:
+            self.get_logger().warn("No XY logs for track overlay.")
+            return
 
-        # Plot formatting
-        ax_xy.set_title("XY overlay: Detection vs Tracking vs GT")
-        ax_xy.set_xlabel("x [m]")
-        ax_xy.set_ylabel("y [m]")
-        ax_xy.axis("equal")
-        ax_xy.grid(True, alpha=0.25)
-        ax_xy.legend(loc="best")
+        xy_ref = np.asarray(self.log_xy_ref, dtype=float)
+        xy_est = np.asarray(self.log_xy_est, dtype=float)
 
-        # # Right: XY overlay of detection vs tracking (+GT + centerline)
-        # ax_xy = fig.add_subplot(gs[0, 1])
+        n = min(len(xy_ref), len(xy_est))
+        xy_ref = xy_ref[:n]
+        xy_est = xy_est[:n]
 
-        # # --- draw centerline if available ---
-        # if self.centerline_xy is not None and len(self.centerline_xy) > 1:
-        #     ax_xy.plot(self.centerline_xy[:, 0], self.centerline_xy[:, 1],
-        #             lw=1.0, color='0.6', alpha=0.8, zorder=0, label="Centerline")
+        # Downsample for readability
+        step = max(1, n // max(1, downsample_max_points))
+        xy_ref_p = xy_ref[::step]
+        xy_est_p = xy_est[::step]
 
-        # # Tracking (EKF)
-        # ax_xy.plot(xy_trk[:, 0], xy_trk[:, 1], lw=1.2, color='tab:blue', zorder=2, label="Tracking (EKF)")
-        # # Detection (raw)
-        # ax_xy.plot(xy_det[:, 0], xy_det[:, 1], lw=1.0, color='tab:orange', zorder=3, label="Detection (raw)")
-        # # Ground truth (GT)
-        # xy_gt = np.array(self.log_xy_ref[:n])[::step]
-        # ax_xy.plot(xy_gt[:, 0], xy_gt[:, 1], lw=1.2, color='tab:green', zorder=4, label="Ground Truth")
+        fig, ax = plt.subplots(figsize=(7.5, 6.0), constrained_layout=True)
 
-        # ax_xy.set_title("XY overlay: Detection vs Tracking vs GT (+Centerline)")
-        # ax_xy.set_xlabel("x [m]")
-        # ax_xy.set_ylabel("y [m]")
-        # ax_xy.axis("equal")
-        # ax_xy.grid(True, alpha=0.25)
-        # ax_xy.legend(loc="best")
+        ax.plot(xy_ref_p[:, 0], xy_ref_p[:, 1], lw=1.5, label="GT trajectory")
+        ax.plot(xy_est_p[:, 0], xy_est_p[:, 1], lw=1.5, label="EKF estimate")
+
+        # plot centerline
+        # if getattr(self, "centerline_xy", None) is not None and len(self.centerline_xy) > 1:
+        #     cl = np.asarray(self.centerline_xy, dtype=float)
+        #     ax.plot(cl[:, 0], cl[:, 1], lw=1.0, alpha=0.6, label="Centerline")
+
+        ax.set_title("Track Overlay (GT vs EKF)")
+        ax.set_xlabel("x [m]")
+        ax.set_ylabel("y [m]")
+        ax.axis("equal")
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="best")
+
+        os.makedirs(self.save_dir, exist_ok=True)
+        out_path = os.path.join(self.save_dir, "final_track_overlay_" + self.save_name_suf + ".png")
+        fig.savefig(out_path, dpi=150, bbox_inches="tight")
+        self.get_logger().info(f"Saved track overlay: {out_path}")
+
+        plt.show(block=False)
+        plt.pause(0.1)
+
+    def compute_kpi_by_speed(self):
+        """
+        Compute KPIs for a constant commanded speed.
+        Outputs metrics suitable for a PPT table.
+        """
+        t = self.log_t
+        dist = self.log_dist
+        vs_est = self.log_vs_est
+
+        if self.v_cmd_const is None:
+            self.get_logger().warn("v_cmd_const is None; KPI skipped.")
+            return None
+
+        t = np.asarray(t)
+        dist = np.asarray(dist)
+        vs_est = np.asarray(vs_est)
+
+        mask = np.isfinite(dist) & np.isfinite(vs_est)
+        if np.sum(mask) < 20:
+            self.get_logger().warn("Not enough valid samples for KPI.")
+            return None
+
+        dist = dist[mask]
+        vs_est = vs_est[mask]
+
+        # --- position KPIs ---
+        pos_mean = float(np.mean(dist))
+        pos_rmse = float(np.sqrt(np.mean(dist**2)))
+        pos_p95  = float(np.percentile(dist, 95))
+
+        # --- speed KPIs ---
+        vs_err = np.abs(vs_est - float(self.v_cmd_const))
+        vs_mean = float(np.mean(vs_err))
+        vs_p95  = float(np.percentile(vs_err, 95))
+
+        kpi = {
+            "v_cmd [m/s]": self.v_cmd_const,
+            "N": int(len(dist)),
+            "pos_mean [m]": pos_mean,
+            "pos_rmse [m]": pos_rmse,
+            "pos_p95 [m]": pos_p95,
+            "|vs-vcmd|_mean [m/s]": vs_mean,
+            "|vs-vcmd|_p95 [m/s]": vs_p95,
+        }
+
+        # self.get_logger().info("=== Perception KPI (constant commanded speed) ===")
+        # for k, v in kpi.items():
+        #     self.get_logger().info(f"{k:>22}: {v}")
+
+        print("=== Perception KPI (constant commanded speed) ===")
+        for k, v in kpi.items():
+            print(f"{k:>22}: {v}")
+
+        self.append_kpi_to_csv(kpi)
+
+        return kpi
+    
+    def append_kpi_to_csv(self, kpi: dict):
+        """
+        Append one KPI record to a CSV file (no overwrite).
+        If file doesn't exist, write header first.
+        """
+        import os
+        import csv
+        import datetime
+
+        if kpi is None:
+            return
+
+        kpi_log_path = os.path.join(self.save_dir, 'kpi_log.csv')
+        os.makedirs(os.path.dirname(kpi_log_path), exist_ok=True)
+
+        file_exists = os.path.isfile(kpi_log_path)
+
+        row = {
+            "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "track": self.track_name,
+            "v_cmd": self.v_cmd_const,
+            "N": kpi.get("N", None),
+            "pos_mean": kpi.get("pos_mean [m]", None),
+            "pos_rmse": kpi.get("pos_rmse [m]", None),
+            "pos_p95": kpi.get("pos_p95 [m]", None),
+            "vs_err_mean": kpi.get("|vs-vcmd|_mean [m/s]", None),
+            "vs_err_p95": kpi.get("|vs-vcmd|_p95 [m/s]", None),
+        }
+
+        fieldnames = list(row.keys())
+
+        with open(kpi_log_path, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
+
+        # Use print to avoid rosout issues after shutdown (optional)
+        print(f"[KPI] Appended to {kpi_log_path}: track={self.track_name}, v_cmd={self.v_cmd_const}")
 
 
-        # Save next to your other outputs
-        save_dir = '/home/lyh/ros2_ws/src/f110_gym/perception/results/'
-        os.makedirs(save_dir, exist_ok=True)
-        fig.savefig(os.path.join(save_dir, "det_vs_trk.png"), dpi=150, bbox_inches="tight")
-        self.get_logger().info(f"Saved detection-vs-tracking figure to {os.path.join(save_dir, 'det_vs_trk.png')}")
-        plt.show()
+    def run_final_evaluation(self):
 
+        self.show_main_3panel()
+        self.show_hexbin_95ellipse()
+        self.show_track_overlay()
 
+        self.compute_kpi_by_speed()
 
 
 def main():
     rclpy.init()
-    node = EkfVsGtMonitor()
+    node = EkfVsGtMonitor(track_name='Autodrive', v_cmd_const=1.0)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
         try:
-            pass
-            # node.show_figure()  # <-- show on Ctrl+C
-            # node.show_compare_figure()
-            # node.show_det_vs_trk_figure()
+            # pass
+            node.run_final_evaluation()
 
         except Exception as e:
-            node.get_logger().error(f"Failed to show figure: {e}")
+            node.get_logger().error(f"Final evaluation failed: {e}")
         node.destroy_node()
         rclpy.shutdown()
 

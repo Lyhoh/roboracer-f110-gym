@@ -71,8 +71,8 @@ Visualization Manager:
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
-        Max Value: 52.58713150024414
-        Min Value: 49.3776969909668
+        Max Value: 117.29927062988281
+        Min Value: 105.67208862304688
         Value: true
       Axis: X
       Channel Name: intensity
@@ -243,17 +243,17 @@ Visualization Manager:
         Value: /perception/static_dynamic_marker_pub
       Value: true
     - Class: rviz_default_plugins/MarkerArray
-      Enabled: true
+      Enabled: false
       Name: MarkerArray
       Namespaces:
-        obstacles: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /perception/markers
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/MarkerArray
       Enabled: false
       Name: MarkerArray
@@ -307,10 +307,10 @@ Visualization Manager:
         Value: /planner/avoidance/markers
       Value: false
     - Class: rviz_default_plugins/Marker
-      Enabled: true
+      Enabled: false
       Name: Marker
       Namespaces:
-        "": true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -318,12 +318,12 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /perception/boundaries
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/Marker
-      Enabled: true
+      Enabled: false
       Name: Marker
       Namespaces:
-        waypoints: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -331,22 +331,21 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /planner/global_waypoints_markers
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/MarkerArray
-      Enabled: true
+      Enabled: false
       Name: MarkerArray
       Namespaces:
-        static_walls_left: true
-        static_walls_right: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /perception/static_walls
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/MarkerArray
-      Enabled: true
+      Enabled: false
       Name: MarkerArray
       Namespaces:
         {}
@@ -356,7 +355,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /perception/frenet_debug
-      Value: true
+      Value: false
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -402,8 +401,8 @@ Visualization Manager:
   Value: true
   Views:
     Current:
-      Class: rviz_default_plugins/Orbit
-      Distance: 99.18783569335938
+      Class: rviz_default_plugins/ThirdPersonFollower
+      Distance: 12.363365173339844
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -413,15 +412,15 @@ Visualization Manager:
         X: 0
         Y: 0
         Z: 0
-      Focal Shape Fixed Size: true
+      Focal Shape Fixed Size: false
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.2297961711883545
-      Target Frame: <Fixed Frame>
-      Value: Orbit (rviz)
-      Yaw: 4.620412349700928
+      Pitch: 0.8503985404968262
+      Target Frame: ego_racecar/laser
+      Value: ThirdPersonFollower (rviz_default_plugins)
+      Yaw: 3.280402183532715
     Saved: ~
 Window Geometry:
   Displays:
@@ -437,5 +436,5 @@ Window Geometry:
   Views:
     collapsed: false
   Width: 1600
-  X: 394
-  Y: 413
+  X: 377
+  Y: 519

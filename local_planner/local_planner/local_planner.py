@@ -31,12 +31,17 @@ class SimpleSQPAvoidanceNode(Node):
 
         # --- Parameters ---
         self.declare_parameter('lookahead', 15.0)
-        self.declare_parameter('evasion_dist', 0.6)
+        self.declare_parameter('evasion_dist', 0.6)  # 0.6
         self.declare_parameter('back_to_raceline_before', 3.0)  # 3.0
         self.declare_parameter('back_to_raceline_after', 3.0)  # 3.0
         self.declare_parameter('d_margin', 0.2)
         self.declare_parameter('avoidance_resolution', 25)
         self.declare_parameter('only_dynamic_obstacles', True)
+
+        # --- Overtake speed rule ---
+        self.declare_parameter('ot_min_speed_delta', 0.5)  # m/s, ego must be at least this much faster than opponent
+        self.declare_parameter('ot_speed_scale', 1.05)     # optional, slightly increase base raceline speed
+        self.declare_parameter('ot_speed_cap', 6.0)        # m/s, safety cap
 
         # Internal states
         self.frenet_state = Odometry()
@@ -57,6 +62,23 @@ class SimpleSQPAvoidanceNode(Node):
         # For continuity
         self.last_ot_side = "right"  # "left" or "right"
         self.past_avoidance_d = None
+        self.declare_parameter('ot_finish_margin_s', 1.0)     # m, pass opponent by this much before finishing
+        self.declare_parameter('ot_lost_timeout_s', 0.5)      # s, allow losing detection briefly
+        self.declare_parameter('ot_cooldown_s', 2.0)          # m in s-space, avoid immediate re-trigger
+
+        self.overtake_active = False
+        self.ot_target_id = None
+        self.ot_side = None
+        self.ot_target_s_end = None
+        self.ot_last_seen_time = None
+        self.ot_cooldown_until_s = None
+
+        # --- Cached opponent info for dropout handling ---
+        self.ot_cached_s_start = None
+        self.ot_cached_s_end = None
+        self.ot_cached_d_left = None
+        self.ot_cached_d_right = None
+        self.ot_cached_vs = 0.0
 
         # Subscriptions
         self.create_subscription(
@@ -166,6 +188,7 @@ class SimpleSQPAvoidanceNode(Node):
     def obstacles_cb(self, msg: ObstacleArray):
         """Callback for perception obstacles."""
         self.obstacles = msg
+        # self.get_logger().info(f"speed = {msg.obstacles[0].vs} m/s")
 
     # -------------------- Main loop -------------------- #
 
@@ -174,7 +197,6 @@ class SimpleSQPAvoidanceNode(Node):
         if (self.converter is None or
             self.global_waypoints_msg is None or
             self.global_raceline_msg is None):
-            # self.get_logger().warn("[SimpleSQP] Waiting for centerline, raceline and FrenetConverter...")
             return
 
         # Current Frenet state
@@ -189,6 +211,16 @@ class SimpleSQPAvoidanceNode(Node):
         resolution = int(self.get_parameter('avoidance_resolution').value)
         only_dyn = bool(self.get_parameter('only_dynamic_obstacles').value)
 
+        # Optional cooldown: do not start a new overtake immediately after finishing
+        if self.ot_cooldown_until_s is not None:
+            ds_cd = (self.ot_cooldown_until_s - cur_s) % self.scaled_max_s
+            if ds_cd < self.scaled_max_s / 2:
+                # still in cooldown window
+                self.publish_empty_outputs()
+                return
+            else:
+                self.ot_cooldown_until_s = None
+
         # 1) Select relevant obstacle (closest ahead, within lookahead)
         considered_obs = []
         for obs in self.obstacles.obstacles:
@@ -199,23 +231,96 @@ class SimpleSQPAvoidanceNode(Node):
             if 0.0 <= ds <= lookahead:
                 considered_obs.append(obs)
 
-        if not considered_obs:
-            # No one ahead -> publish empty OT path (meaning: use normal path)
-            empty_msg = OTWpntArray()
-            empty_msg.header = Header()
-            empty_msg.header.stamp = self.get_clock().now().to_msg()
-            empty_msg.header.frame_id = "map"
-            self.ot_pub.publish(empty_msg)
-            return
+        now_time = self.get_clock().now()
+        
+        target_obs = None
+        use_cached = False 
 
-        # 2) Take the closest obstacle
-        considered_obs.sort(key=lambda o: (o.s_start - cur_s) % self.scaled_max_s)
-        target_obs = considered_obs[0]
+        # ---------- Guard: no obstacle in lookahead ----------
+        if len(considered_obs) == 0:
+            # self.get_logger().info(
+            #     f"[LP] use_cached={use_cached} "
+            #     f"overtake_active={self.overtake_active} "
+            #     f"obs_in_lookahead={len(considered_obs)}"
+            # )
+
+            if not self.overtake_active:
+                self.publish_empty_outputs()
+                return
+
+            lost_timeout = float(self.get_parameter('ot_lost_timeout_s').value)
+            if self.ot_last_seen_time is not None:
+                dt = (now_time - self.ot_last_seen_time).nanoseconds * 1e-9
+            else:
+                dt = 999.0
+
+            if dt <= lost_timeout:
+                # Use cached opponent info to keep publishing OT
+                if (self.ot_cached_s_start is None) or (self.ot_cached_s_end is None):
+                    # no cache -> cannot continue safely
+                    self.overtake_active = False
+                    self.publish_empty_outputs()
+                    return
+                use_cached = True
+            else:
+                # Lost too long -> abort overtake
+                self.overtake_active = False
+                self.ot_target_id = None
+                self.ot_side = None
+                self.ot_target_s_end = None
+                self.ot_last_seen_time = None
+                self.publish_empty_outputs()
+                return
+
+        if not use_cached:
+            # 2) Take the closest obstacle (len > 0 guaranteed here)
+            considered_obs.sort(key=lambda o: (o.s_start - cur_s) % self.scaled_max_s)
+
+            if not self.overtake_active:
+                # Start a new overtake: pick closest ahead
+                target_obs = considered_obs[0]
+                self.ot_target_id = getattr(target_obs, "id", None)
+            else:
+                # During overtake: try to keep the same target
+                if self.ot_target_id is not None:
+                    for o in considered_obs:
+                        if getattr(o, "id", None) == self.ot_target_id:
+                            target_obs = o
+                            break
+                if target_obs is None:
+                    target_obs = considered_obs[0]
+
+            # Update "last seen" timestamp and stored s_end
+            self.ot_last_seen_time = now_time
+            self.ot_target_s_end = float(target_obs.s_end)
+
+            # Cache opponent info for dropout handling
+            self.ot_cached_s_start = float(target_obs.s_start)
+            self.ot_cached_s_end   = float(target_obs.s_end)
+            self.ot_cached_d_left  = float(target_obs.d_left)
+            self.ot_cached_d_right = float(target_obs.d_right)
+            self.ot_cached_vs      = max(0.0, float(getattr(target_obs, "vs", 0.0)))
+        else:
+            # cached mode: do NOT touch considered_obs[0] or target_obs
+            target_obs = None
 
         # 3) Decide which side to overtake
-        #    We assume WaypointArray has d_left (>0) and d_right (<0), like ForzaETH
         #    Use an approximate local region around obstacle center
-        s_center = 0.5 * (target_obs.s_start + target_obs.s_end)
+        if use_cached:
+            s_start = self.ot_cached_s_start
+            s_end   = self.ot_cached_s_end
+            d_left_obs  = self.ot_cached_d_left
+            d_right_obs = self.ot_cached_d_right
+            opp_vs = float(self.ot_cached_vs)
+        else:
+            s_start = float(target_obs.s_start)
+            s_end   = float(target_obs.s_end)
+            d_left_obs  = float(target_obs.d_left)
+            d_right_obs = float(target_obs.d_right)
+            opp_vs = max(0.0, float(getattr(target_obs, "vs", 0.0)))
+            self.ot_cached_vs = opp_vs  # keep fresh
+
+        s_center = 0.5 * (s_start + s_end)
         # Find closest waypoint index to s_center
         wpnts = self.global_waypoints_msg.wpnts
         s_array = np.array([wp.s_m for wp in wpnts])
@@ -227,31 +332,65 @@ class SimpleSQPAvoidanceNode(Node):
         d_right_wall = -wp_center.d_right        # right wall < 0
 
         # Available free space on each side
-        left_space = d_left_wall - target_obs.d_left    # distance between obstacle and left wall
-        right_space = target_obs.d_right - d_right_wall # = target_obs.d_right + wp_center.d_right
-        # left_space = wp_center.d_left - target_obs.d_left    # free space to the left
-        # right_space = target_obs.d_right - wp_center.d_right # free space to the right
-
-        # Choose side with more space
-        if left_space > right_space:
-            side = "left"
-            d_apex = target_obs.d_left + evasion_dist
-            if d_apex < 0.0:
-                d_apex = 0.0  # ensure apex is on the left side
+        left_space  = d_left_wall - d_left_obs
+        right_space = d_right_obs - d_right_wall
+        
+        if not self.overtake_active:
+            # Decide side only when starting overtake
+            if left_space > right_space:
+                side = "left"
+            else:
+                side = "right"
+            self.ot_side = side
         else:
-            side = "right"
-            d_apex = target_obs.d_right - evasion_dist
-            if d_apex > 0.0:
-                d_apex = 0.0  # ensure apex is on the right side
+            # Keep previous side
+            side = self.ot_side if self.ot_side is not None else ("left" if left_space > right_space else "right")
+            self.ot_side = side
+
+        if side == "left":
+            d_apex = d_left_obs + evasion_dist
+            d_apex = max(d_apex, 0.0)
+        else:
+            d_apex = d_right_obs - evasion_dist
+            d_apex = min(d_apex, 0.0)
 
         self.last_ot_side = side
 
         # 4) Define avoidance s-interval
-        start_avoid = max(cur_s, target_obs.s_start - back_before)
-        end_avoid = target_obs.s_end + back_after
+        start_avoid = max(cur_s, s_start - back_before)
+        end_avoid   = s_end + back_after
+
         if end_avoid <= start_avoid:
             # Degenerate interval, do nothing
             return
+        
+        finish_margin = float(self.get_parameter('ot_finish_margin_s').value)
+
+        # check if overtake finished: ego passed opponent end + margin
+        finish_s = (self.ot_target_s_end + finish_margin) % self.scaled_max_s
+        ds_to_finish = (finish_s - cur_s) % self.scaled_max_s
+
+        passed_finish = ds_to_finish > (self.scaled_max_s / 2)  # finish point is behind ego (mod-safe)
+
+        if self.overtake_active and passed_finish:
+            # Finish overtake
+            self.overtake_active = False
+            self.ot_target_id = None
+            self.ot_side = None
+            self.ot_target_s_end = None
+            self.ot_last_seen_time = None
+
+            # cooldown (optional)
+            cooldown_s = float(self.get_parameter('ot_cooldown_s').value)
+            self.ot_cooldown_until_s = (cur_s + cooldown_s) % self.scaled_max_s
+
+            self.publish_empty_outputs()
+            return
+
+        # If not active yet, we are starting now
+        if not self.overtake_active:
+            self.overtake_active = True
+
 
         s_avoid = np.linspace(start_avoid, end_avoid, resolution)
         s_avoid_mod = np.mod(s_avoid, self.scaled_max_s)
@@ -292,8 +431,7 @@ class SimpleSQPAvoidanceNode(Node):
         x_array = resp[0, :]
         y_array = resp[1, :]
 
-        # 7) Assign a speed profile (simple: use global waypoint speed or constant) 
-        # # TODO
+        # 7) Assign a speed profile 
         # v_profile = []
         # for s_i in s_avoid_mod:
         #     idx = int(np.argmin(np.abs(s_array - s_i)))
@@ -305,6 +443,33 @@ class SimpleSQPAvoidanceNode(Node):
             self.race_s_array,
             self.race_v_array
         )
+
+        # --- Enforce ego faster than opponent during overtake ---
+        ot_min_speed_delta = float(self.get_parameter('ot_min_speed_delta').value)
+        ot_speed_scale     = float(self.get_parameter('ot_speed_scale').value)
+        ot_speed_cap       = float(self.get_parameter('ot_speed_cap').value)
+
+        # Opponent longitudinal speed in Frenet s (vs). Make it non-negative for safety.
+        # opp_vs = float(getattr(target_obs, "vs", 0.0))
+        # opp_vs = max(0.0, opp_vs)
+
+        # 1) start from base profile (raceline) and optionally scale it up a bit
+        v_profile = v_profile * ot_speed_scale
+
+        # 2) enforce a minimum: ego >= opponent + delta
+        v_min = opp_vs + ot_min_speed_delta
+        v_profile = np.maximum(v_profile, v_min)
+
+        # 3) cap speed to avoid unsafe acceleration
+        v_profile = np.clip(v_profile, 0.0, ot_speed_cap)
+
+        # v_mean = float(np.mean(v_profile)) if len(v_profile) > 0 else 0.0
+
+        # self.get_logger().info(
+        #     f"[Overtake] Opponent vs = {opp_vs:.2f} m/s | "
+        #     f"Planned ego v_mean = {v_mean:.2f} m/s | "
+        #     f"v_min = {v_min:.2f} m/s"
+        # )
 
         self.publish_ot_waypoints(x_array, y_array, s_avoid_mod, d_profile, v_profile)
         self.publish_path(x_array, y_array)
@@ -458,7 +623,7 @@ class SimpleSQPAvoidanceNode(Node):
             m.pose.position.z = 0.05  # small lift from ground
             m.pose.orientation.w = 1.0
 
-            # Size：随速度变化一点点
+            # Size
             scale = 0.1 + 0.2 * (v / vmax)
             m.scale.x = scale
             m.scale.y = scale

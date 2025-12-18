@@ -146,6 +146,10 @@ class DualPurePursuitNode(Node):
         # Lateral offsets (meters): + is left of tangent
         self.lat_offset_ego = float(self.declare_parameter('lateral_offset_ego',  0.0).value)  # 0.4
         self.lat_offset_opp = float(self.declare_parameter('lateral_offset_opp', -0.0).value) # -0.4
+        
+        self.declare_parameter('ot_empty_fallback_count', 5) 
+        self.ot_empty_count = 0
+
 
         # Vehicle & controller params
         L = float(self.declare_parameter('wheelbase', 0.33).value)
@@ -179,6 +183,14 @@ class DualPurePursuitNode(Node):
             v_target_max=float(self.declare_parameter('v_target_max_opp', 4.0).value),
             v_ramp_rate=float(self.declare_parameter('v_ramp_rate_opp', 2.0).value)
         )
+
+        # --- Store ego speed policy to restore after overtake ---
+        self.ego_use_path_speed_backup = self.ctrl_ego.use_path_speed
+        self.ego_speed_scale_backup = self.ctrl_ego.speed_scale
+
+        # --- Overtake mode speed policy (from YAML) ---
+        self.ot_use_path_speed_ego = bool(self.declare_parameter('ot_use_path_speed_ego', True).value)
+        self.ot_speed_scale_ego = float(self.declare_parameter('ot_speed_scale_ego', 2.0).value)  # 1.0 = follow planner speed exactly
 
         self.base_xy = None
         self.base_psi = None  
@@ -274,24 +286,73 @@ class DualPurePursuitNode(Node):
     def on_ot_path(self, msg: OTWpntArray):
         """
         Callback for local planner's overtaking path.
-        If msg.wpnts is non-empty -> ego uses this path.
-        If empty -> ego falls back to its base (offset) raceline.
+        If msg.wpnts is non-empty -> ego uses this path (and its speed if provided).
+        If empty -> ego falls back to its base (offset) raceline and restores speed policy.
         """
         if len(msg.wpnts) == 0:
+            n = int(self.get_parameter('ot_empty_fallback_count').value)
+            self.ot_empty_count += 1
+            
+            if self.ego_using_ot_path and self.ot_empty_count < n:
+                self.get_logger().info(f"[DualPP] OT empty ({self.ot_empty_count}/{n}) -> keep OT (debounce).")
+                return
+            
+            self.ot_empty_count = 0
+            
             # Fallback to base ego path
             if self.ego_base_xy is not None and not self.ego_using_ot_path:
                 return
+
             if self.ego_base_xy is not None:
+                # Restore speed policy from YAML-configured ego controller
+                self.ctrl_ego.use_path_speed = self.ego_use_path_speed_backup
+                self.ctrl_ego.speed_scale = self.ego_speed_scale_backup
+
                 self.ctrl_ego.set_path(self.ego_base_xy, self.base_vx)
                 self.ego_using_ot_path = False
-                self.get_logger().info("[DualPP] OT path empty -> Ego back to base path.")
+                self.get_logger().info("[DualPP] OT path empty -> Ego back to base path (restore speed policy).")
             return
 
+        self.ot_empty_count = 0
+
+        # Build OT path xy
         ot_xy = np.array([[wp.x_m, wp.y_m] for wp in msg.wpnts], dtype=float)
 
-        self.ctrl_ego.set_path(ot_xy, None)
+        # Build OT speed profile from planner (vx_mps). If missing, fallback to None.
+        ot_vx = []
+        has_vx = True
+        for wp in msg.wpnts:
+            if hasattr(wp, 'vx_mps'):
+                ot_vx.append(max(0.0, float(wp.vx_mps)))
+            else:
+                has_vx = False
+                break
+        ot_vx = np.array(ot_vx, dtype=float) if (has_vx and len(ot_vx) == len(msg.wpnts)) else None
+        # self.get_logger().info(f"ot_vx = {ot_vx}")
+        # ot_vx = np.full(len(msg.wpnts), 4.0)
+
+        # Force ego speed policy in overtake mode (use planner speed)
+        self.ctrl_ego.use_path_speed = self.ot_use_path_speed_ego
+        self.ctrl_ego.speed_scale = self.ot_speed_scale_ego
+
+        # Set OT path (+ OT speeds)
+        self.ctrl_ego.set_path(ot_xy, ot_vx)
         self.ego_using_ot_path = True
-        self.get_logger().info(f"[DualPP] Received OT path with {len(ot_xy)} points -> Ego following OT path")
+
+        if ot_vx is not None:
+            self.get_logger().info(
+                f"[DualPP] Received OT path {len(ot_xy)} pts -> Ego following OT path WITH planner speed "
+                f"(mean vx={float(np.mean(ot_vx)):.2f} m/s)"
+            )
+            # self.get_logger().info(
+            #     f"[DualPP] OT speed policy: use_path_speed={self.ctrl_ego.use_path_speed}, "
+            #     f"speed_scale={self.ctrl_ego.speed_scale:.2f}, v_target_max={self.ctrl_ego.v_target_max:.2f}"
+            # )
+        else:
+            self.get_logger().info(
+                f"[DualPP] Received OT path {len(ot_xy)} pts -> Ego following OT path (NO vx in msg, fallback speed policy)"
+            )
+
 
     def on_odom_ego(self, msg: Odometry):
         p = msg.pose.pose.position
@@ -314,7 +375,8 @@ class DualPurePursuitNode(Node):
         self.ctrl_opp.pose_ok = True
 
     def on_timer(self):
-        if not (self.per_ready and self.lp_ready and self.track_ready):
+        # if not (self.per_ready and self.lp_ready and self.track_ready):
+        if not (self.per_ready and self.track_ready):
             # self.get_logger().info("Waiting for perception to be ready...")
             return
         

@@ -20,7 +20,7 @@ if os.path.isdir(tracks_root):
     for root, _, files in os.walk(tracks_root):
         if not files:
             continue
-        rel_root = os.path.relpath(root, 'maps')   # -> 'f1tenth_racetracks/Austin'
+        rel_root = os.path.relpath(root, 'maps')  
         dest = os.path.join('share', package_name, 'maps', rel_root)
         src_files = [os.path.join(root, f) for f in files]
         data_files.append((dest, src_files))

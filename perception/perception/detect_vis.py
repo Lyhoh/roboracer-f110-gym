@@ -54,7 +54,7 @@ class Detect(Node):
         self.declare_parameter('max_obs_size', 0.8)   # 10
 
         # === Static wall map (from static_map.npz) ===
-        self.declare_parameter('use_static_map', True)
+        self.declare_parameter('use_static_map', False)
         self.declare_parameter('static_map_path', '/home/lyh/ros2_ws/src/f110_gym/localization/static_map/static_map.npz')
         self.declare_parameter('static_tol', 0.2)  # tolerance in d when matching wall
 
@@ -95,6 +95,9 @@ class Detect(Node):
         self.pub_obstacles_message = self.create_publisher(ObstacleArray, '/perception/raw_obstacles', 10)
         self.pub_static_walls = self.create_publisher(MarkerArray, '/perception/static_walls', 10)
 
+        self.pub_frenet_debug = self.create_publisher(MarkerArray, "/perception/frenet_debug", 1)
+
+
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
@@ -113,6 +116,44 @@ class Detect(Node):
         self.create_subscription(Odometry, '/ego_racecar/odom', self.odom_callback, 10)
         self.create_subscription(WaypointArray, '/global_centerline', self.path_callback, wp_qos)
 
+        # --- LiDAR raw points visualization (RViz Marker) ---
+        self.declare_parameter('viz_lidar_points', True)
+        self.declare_parameter('viz_lidar_stride', 2)     # 1=all points, 2=every 2 points, 5=every 5 points
+        self.declare_parameter('viz_lidar_z', 0.05)       # slightly above ground
+
+        self.viz_lidar_points = self.get_parameter('viz_lidar_points').get_parameter_value().bool_value
+        self.viz_lidar_stride = self.get_parameter('viz_lidar_stride').get_parameter_value().integer_value
+        self.viz_lidar_z = self.get_parameter('viz_lidar_z').get_parameter_value().double_value
+
+        self.pub_lidar_points = self.create_publisher(Marker, '/perception/lidar_points', 10)
+
+        # --- Cluster visualization ---
+        self.declare_parameter('viz_clusters', True)
+        self.declare_parameter('viz_cluster_max', 30)        # limit to avoid RViz overload
+        self.declare_parameter('viz_cluster_stride', 1)      # downsample points within each cluster
+        self.declare_parameter('viz_cluster_z', 0.08)
+        self.declare_parameter('viz_text_z', 0.25)
+
+        self.viz_clusters = self.get_parameter('viz_clusters').get_parameter_value().bool_value
+        self.viz_cluster_max = self.get_parameter('viz_cluster_max').get_parameter_value().integer_value
+        self.viz_cluster_stride = self.get_parameter('viz_cluster_stride').get_parameter_value().integer_value
+        self.viz_cluster_z = self.get_parameter('viz_cluster_z').get_parameter_value().double_value
+        self.viz_text_z = self.get_parameter('viz_text_z').get_parameter_value().double_value
+
+        self.pub_cluster_markers = self.create_publisher(MarkerArray, "/perception/cluster_debug", 10)
+        # --- Filtered (pre-rect) visualization ---
+        self.declare_parameter('viz_filtered_clusters', True)
+        self.declare_parameter('viz_filtered_stride', 2)
+        self.declare_parameter('viz_filtered_z', 0.10)
+
+        self.viz_filtered_clusters = self.get_parameter('viz_filtered_clusters').get_parameter_value().bool_value
+        self.viz_filtered_stride = self.get_parameter('viz_filtered_stride').get_parameter_value().integer_value
+        self.viz_filtered_z = self.get_parameter('viz_filtered_z').get_parameter_value().double_value
+
+        self.pub_filtered_markers = self.create_publisher(MarkerArray, "/perception/filtered_pre_rect", 10)
+
+
+
         # States
         self.current_stamp = None
         self._debug_id = 0
@@ -127,7 +168,7 @@ class Detect(Node):
         self.smallest_d = 0.0
         self.biggest_d = 0.0
         self.path_needs_update = False
-        self.boundary_inflation = 0.3 # 0.1, 0.3
+        self.boundary_inflation = 0.2 # 0.1, 0.3
         self.H_map_bl = None
         self.t_map_bl = None  # rclpy.time.Time of the cached transform
         self.prev_ids = set()
@@ -205,6 +246,361 @@ class Detect(Node):
         self.H_map_bl = H_map_odom @ H_odom_bl
         self.t_map_bl = Time.from_msg(self.current_stamp)  # odom.header.stamp
 
+    def debug_frenet_consistency(self, xs, ys):
+        """Check consistency of converter.get_frenet & get_cartesian on centerline."""
+        if self.converter is None:
+            self.get_logger().warn("converter is None, cannot debug Frenet.")
+            return
+
+        max_d = 0.0
+        max_pos_err = 0.0
+
+        N = len(xs)
+        step = max(1, N // 20)  # sample about 20 points
+
+        for i in range(0, N, step):
+            x_i = float(xs[i])
+            y_i = float(ys[i])
+
+            s_arr, d_arr = self.converter.get_frenet(
+                np.atleast_1d(x_i), np.atleast_1d(y_i)
+            )
+            s_i = float(s_arr[0])
+            d_i = float(d_arr[0])
+
+            x_back, y_back = self.converter.get_cartesian(s_i, d_i)
+
+            pos_err = math.hypot(x_back - x_i, y_back - y_i)
+            max_d = max(max_d, abs(d_i))
+            max_pos_err = max(max_pos_err, pos_err)
+
+            self.get_logger().info(
+                f"[FRENET_DBG] i={i}: s={s_i:.2f}, d={d_i:.4f}, "
+                f"pos_err={pos_err:.4f}"
+            )
+
+        self.get_logger().info(
+            f"[FRENET_DBG] max |d| on centerline = {max_d:.4f}, "
+            f"max pos_err = {max_pos_err:.4f}"
+        )
+
+    def debug_s_axis(self, xs, ys, ss_raw):
+        N = len(xs)
+        step = max(1, N // 20)
+
+        for i in range(0, N, step):
+            x_i = float(xs[i])
+            y_i = float(ys[i])
+            s_msg = float(ss_raw[i])
+
+            s_arr, d_arr = self.converter.get_frenet(
+                np.atleast_1d(x_i), np.atleast_1d(y_i)
+            )
+            s_conv = float(s_arr[0])
+            d_conv = float(d_arr[0])
+
+            self.get_logger().info(
+                f"[S_AXIS] i={i}: s_msg={s_msg:.2f}, s_conv={s_conv:.2f}, "
+                f"diff={s_conv - s_msg:.2f}, d_conv={d_conv:.4f}"
+            )
+    def publish_frenet_normals(self, xs, ys):
+        if self.converter is None:
+            return
+
+        ma = MarkerArray()
+        N = len(xs)
+        # step = max(1, N // 30)
+        step = 1
+
+        for k, i in enumerate(range(0, N, step)):
+            x_i = float(xs[i])
+            y_i = float(ys[i])
+
+            # 用 converter 的 get_frenet 取出对应的 s
+            s_arr, d_arr = self.converter.get_frenet(
+                np.atleast_1d(x_i), np.atleast_1d(y_i)
+            )
+            s_i = float(s_arr[0])
+            self.get_logger().info(f"s_i: {s_i}, d_i: {d_arr[0]}")
+
+            # 在 Frenet 坐标中，取 d=0 和 d=+1.0 再 get_cartesian，连成箭头
+            x0, y0 = self.converter.get_cartesian(s_i, 0.0)
+            x1, y1 = self.converter.get_cartesian(s_i, 1.0)  # +d 方向
+
+            m = Marker()
+            m.header.frame_id = 'map'  # 或 "map"/"odom"
+            m.header.stamp = self.get_clock().now().to_msg()
+            m.ns = "frenet_normals"
+            m.id = k
+            m.type = Marker.ARROW
+            m.action = Marker.ADD
+            m.scale.x = 0.1   # shaft diameter
+            m.scale.y = 0.2   # head diameter
+            m.scale.z = 0.2   # head length
+            m.color.a = 1.0
+            m.color.r = 0.0
+            m.color.g = 0.0
+            m.color.b = 1.0
+
+            p0 = Point(x=x0, y=y0, z=0.0)
+            p1 = Point(x=x1, y=y1, z=0.0)
+            m.points = [p0, p1]
+
+            ma.markers.append(m)
+
+        self.pub_frenet_debug.publish(ma)
+
+    def publish_lidar_points_marker(self, pts_map: np.ndarray):
+        """
+        Publish raw lidar points (already in map frame) as SPHERE_LIST marker.
+        pts_map: (N,2) ndarray in 'map' frame
+        """
+        if pts_map is None or pts_map.shape[0] == 0:
+            return
+
+        m = Marker()
+        m.header.frame_id = "map"
+        m.header.stamp = self.current_stamp if self.current_stamp is not None else self.get_clock().now().to_msg()
+        m.ns = "lidar_raw"
+        m.id = 0
+        m.type = Marker.SPHERE_LIST
+        m.action = Marker.ADD
+
+        # sphere size
+        m.scale.x = 0.2
+        m.scale.y = 0.2
+        m.scale.z = 0.2
+
+        # color 
+        m.color.a = 1.0
+        m.color.r = 1.0
+        m.color.g = 0.0
+        m.color.b = 0.0
+
+        # short lifetime so it updates smoothly
+        m.lifetime = DurationMsg(sec=0, nanosec=int(0.08 * 1e9))
+
+        z = float(self.viz_lidar_z)
+        stride = max(1, int(self.viz_lidar_stride))
+
+        pts = pts_map[::stride]
+        m.points = [Point(x=float(p[0]), y=float(p[1]), z=z) for p in pts]
+
+        self.pub_lidar_points.publish(m)
+
+    def _color_from_id(self, cid: int):
+        """Deterministic pseudo-random color from cluster id."""
+        # Simple hash -> RGB in [0,1]
+        r = ((cid * 37) % 255) / 255.0
+        g = ((cid * 67) % 255) / 255.0
+        b = ((cid * 97) % 255) / 255.0
+        return r, g, b
+
+    def _cluster_bbox_diag(self, pts_xy: np.ndarray) -> float:
+        """Return bbox diagonal length for cluster size estimate."""
+        if pts_xy is None or pts_xy.shape[0] == 0:
+            return 0.0
+        xmin, ymin = np.min(pts_xy, axis=0)
+        xmax, ymax = np.max(pts_xy, axis=0)
+        return float(math.hypot(xmax - xmin, ymax - ymin))
+    
+    def publish_cluster_debug(self, clusters_bl, H_map_bl: np.ndarray):
+        """
+        Visualize clusters with:
+        - cluster points (SPHERE_LIST, different color)
+        - center point (SPHERE)
+        - text label showing N and bbox diag
+        All published in 'map' frame.
+        """
+        if not self.viz_clusters:
+            return
+        if clusters_bl is None or len(clusters_bl) == 0:
+            return
+        if H_map_bl is None:
+            return
+
+        stamp = self.current_stamp if self.current_stamp is not None else self.get_clock().now().to_msg()
+        ma = MarkerArray()
+
+        # Optional: clear previous markers (use DELETEALL)
+        clear = Marker()
+        clear.header.frame_id = "map"
+        clear.header.stamp = stamp
+        clear.action = Marker.DELETEALL
+        ma.markers.append(clear)
+
+        max_show = min(len(clusters_bl), max(1, int(self.viz_cluster_max)))
+        stride_pts = max(1, int(self.viz_cluster_stride))
+
+        mid_id_base = 30000
+        pts_id_base = 31000
+        txt_id_base = 32000
+
+        for i in range(max_show):
+            c_bl = clusters_bl[i]
+            if c_bl is None or c_bl.shape[0] == 0:
+                continue
+
+            # Transform whole cluster to map
+            c_map = self._transform_xy(c_bl, H_map_bl)
+
+            # Compute center (mean) and size (bbox diagonal)
+            center = np.mean(c_map, axis=0)
+            diag = self._cluster_bbox_diag(c_map)
+            npts = int(c_map.shape[0])
+
+            r, g, b = self._color_from_id(i)
+
+            # (1) Cluster points (SPHERE_LIST)
+            mp = Marker()
+            mp.header.frame_id = "map"
+            mp.header.stamp = stamp
+            mp.ns = "cluster_pts"
+            mp.id = pts_id_base + i
+            mp.type = Marker.SPHERE_LIST
+            mp.action = Marker.ADD
+            mp.scale.x = 0.2
+            mp.scale.y = 0.2
+            mp.scale.z = 0.2
+            mp.color.a = 1.0
+            mp.color.r = r
+            mp.color.g = g
+            mp.color.b = b
+            mp.lifetime = DurationMsg(sec=0, nanosec=int(0.10 * 1e9))
+            zc = float(self.viz_cluster_z)
+
+            pts = c_map[::stride_pts]
+            mp.points = [Point(x=float(p[0]), y=float(p[1]), z=zc) for p in pts]
+            ma.markers.append(mp)
+
+            # # (2) Center point (SPHERE)
+            # mc = Marker()
+            # mc.header.frame_id = "map"
+            # mc.header.stamp = stamp
+            # mc.ns = "cluster_center"
+            # mc.id = mid_id_base + i
+            # mc.type = Marker.SPHERE
+            # mc.action = Marker.ADD
+            # mc.pose.position.x = float(center[0])
+            # mc.pose.position.y = float(center[1])
+            # mc.pose.position.z = zc + 0.02
+            # mc.pose.orientation.w = 1.0
+            # mc.scale.x = 0.12
+            # mc.scale.y = 0.12
+            # mc.scale.z = 0.12
+            # mc.color.a = 1.0
+            # mc.color.r = r
+            # mc.color.g = g
+            # mc.color.b = b
+            # mc.lifetime = DurationMsg(sec=0, nanosec=int(0.10 * 1e9))
+            # ma.markers.append(mc)
+
+            # (3) Text label: N + diag
+            # mt = Marker()
+            # mt.header.frame_id = "map"
+            # mt.header.stamp = stamp
+            # mt.ns = "cluster_text"
+            # mt.id = txt_id_base + i
+            # mt.type = Marker.TEXT_VIEW_FACING
+            # mt.action = Marker.ADD
+            # mt.pose.position.x = float(center[0])
+            # mt.pose.position.y = float(center[1])
+            # mt.pose.position.z = float(self.viz_text_z)
+            # mt.pose.orientation.w = 1.0
+            # mt.scale.z = 0.22  # text height
+            # mt.color.a = 1.0
+            # mt.color.r = 1.0
+            # mt.color.g = 1.0
+            # mt.color.b = 1.0
+            # mt.text = f"id={i}  N={npts}  diag={diag:.2f}m"
+            # mt.lifetime = DurationMsg(sec=0, nanosec=int(0.10 * 1e9))
+            # ma.markers.append(mt)
+
+        self.pub_cluster_markers.publish(ma)
+
+    def publish_filtered_pre_rect(self, kept_clusters_bl, rep_points_map=None):
+        """
+        Publish filtered clusters BEFORE rectangle fitting.
+        - kept_clusters_bl: list of clusters in base_link frame (each is Nx2)
+        - rep_points_map: optional list[(x_map,y_map)] of representative points (best_map)
+        """
+        if not self.viz_filtered_clusters:
+            return
+        if kept_clusters_bl is None or len(kept_clusters_bl) == 0:
+            return
+
+        # Need a valid map<-base_link transform (reuse cached one computed in detect)
+        if self.H_map_bl is None:
+            return
+
+        stamp = self.current_stamp if self.current_stamp is not None else self.get_clock().now().to_msg()
+        ma = MarkerArray()
+
+        # Clear previous markers
+        clear = Marker()
+        clear.header.frame_id = "map"
+        clear.header.stamp = stamp
+        clear.action = Marker.DELETEALL
+        ma.markers.append(clear)
+
+        stride = max(1, int(self.viz_filtered_stride))
+        z = float(self.viz_filtered_z)
+
+        # (A) Filtered cluster points (each cluster has its own color)
+        for i, c_bl in enumerate(kept_clusters_bl):
+            if c_bl is None or c_bl.shape[0] == 0:
+                continue
+
+            c_map = self._transform_xy(c_bl, self.H_map_bl)
+
+            r, g, b = self._color_from_id(i)
+
+            m = Marker()
+            m.header.frame_id = "map"
+            m.header.stamp = stamp
+            m.ns = "filtered_cluster_pts"
+            m.id = 40000 + i
+            m.type = Marker.SPHERE_LIST
+            m.action = Marker.ADD
+            m.scale.x = 0.2
+            m.scale.y = 0.2
+            m.scale.z = 0.2
+            m.color.a = 1.0
+            m.color.r = 1.0
+            m.color.g = 0.0
+            m.color.b = 0.0
+            m.lifetime = DurationMsg(sec=0, nanosec=int(0.10 * 1e9))
+
+            pts = c_map[::stride]
+            m.points = [Point(x=float(p[0]), y=float(p[1]), z=z) for p in pts]
+            ma.markers.append(m)
+
+        # (B) Representative points (best_map) if provided
+        # if rep_points_map is not None and len(rep_points_map) > 0:
+        #     mp = Marker()
+        #     mp.header.frame_id = "map"
+        #     mp.header.stamp = stamp
+        #     mp.ns = "filtered_rep_points"
+        #     mp.id = 41000
+        #     mp.type = Marker.SPHERE_LIST
+        #     mp.action = Marker.ADD
+        #     mp.scale.x = 0.12
+        #     mp.scale.y = 0.12
+        #     mp.scale.z = 0.12
+        #     mp.color.a = 1.0
+        #     mp.color.r = 1.0
+        #     mp.color.g = 1.0
+        #     mp.color.b = 0.0  # yellow
+        #     mp.lifetime = DurationMsg(sec=0, nanosec=int(0.10 * 1e9))
+
+        #     mp.points = [Point(x=float(x), y=float(y), z=z + 0.05) for (x, y) in rep_points_map]
+        #     ma.markers.append(mp)
+
+        self.pub_filtered_markers.publish(ma)
+
+
+
+    
     def path_callback(self, msg: WaypointArray):
         """Initialize track arrays from global_centerline WaypointArray."""
 
@@ -303,6 +699,10 @@ class Detect(Node):
         )
         if self.use_static_map:
             self.publish_static_walls()
+
+        # self.debug_frenet_consistency(xs, ys)
+        # self.debug_s_axis(xs, ys, ss_raw)
+        # self.publish_frenet_normals(xs, ys)
 
     def _load_static_map(self, path: str):
         """Load precomputed static walls (s_axis, d_left, d_right) from npz."""
@@ -641,7 +1041,7 @@ class Detect(Node):
             m.scale.x = size
             m.scale.y = size
             m.scale.z = max(0.02, size * 0.2)  
-            m.color.a = 1.0
+            m.color.a = 0.7
             m.color.r = 1.0
             m.color.g = 0.0
             m.color.b = 0.0
@@ -683,8 +1083,8 @@ class Detect(Node):
             m.id = i
             m.action = Marker.ADD
             m.type = Marker.SPHERE
-            m.scale.x = m.scale.y = m.scale.z = 0.2
-            m.color.a = 0.9; m.color.r = 1.0; m.color.g = 0.2; m.color.b = 0.2
+            m.scale.x = m.scale.y = m.scale.z = 0.5
+            m.color.a = 1.0; m.color.r = 1.0; m.color.g = 0.0; m.color.b = 0.0
             m.pose.position.x = float(x)
             m.pose.position.y = float(y)
             m.pose.orientation.w = 1.0
@@ -838,11 +1238,34 @@ class Detect(Node):
         pts_bl = self.laser_to_bl_points(self.scan)
         if pts_bl is None or pts_bl.shape[0] == 0:
             return
+        
+        # --- visualize raw lidar points in RViz ---
+        if self.viz_lidar_points:
+            # Use the same transform logic as detection to get map<-base_link at scan time
+            scan_t = Time.from_msg(self.scan.header.stamp)
+            MAX_STALENESS_NS = int(0.12 * 1e9)
+
+            use_cached = (self.H_map_bl is not None and self.t_map_bl is not None
+                        and abs(scan_t.nanoseconds - self.t_map_bl.nanoseconds) <= MAX_STALENESS_NS)
+
+            if use_cached:
+                H_map_bl_viz = self.H_map_bl
+            else:
+                tf_map_from_bl_viz = self._lookup_tf_exact_or_backoff(
+                    "map", "ego_racecar/base_link", scan_t,
+                    future_backoff_sec=0.1, timeout_sec=0.08
+                )
+                H_map_bl_viz = self._H_from_tf(tf_map_from_bl_viz) if tf_map_from_bl_viz is not None else None
+
+            if H_map_bl_viz is not None:
+                pts_map = self._transform_xy(pts_bl, H_map_bl_viz)  # (N,2) in map
+                self.publish_lidar_points_marker(pts_map)
+
 
         # --- 2) Cluster in base_link ---
         clusters = self.adaptive_breakpoint_clustering(pts_bl, self.scan.angle_increment)
 
-        # --- 3) For each cluster, compute its midpoint in base_link,
+        # --- 3) For each cluster, compute its representative point in base_link,
         #         transform that single point to map at scan_t,
         #         compute (s,d) via Frenet, and filter by track boundary ---
         kept_clusters_bl = []
@@ -868,30 +1291,11 @@ class Detect(Node):
             H_map_bl = self._H_from_tf(tf_map_from_bl)
             yaw_map_from_bl = self._quat_to_yaw(tf_map_from_bl.transform.rotation)
 
-        # for c in clusters:
-        #     if c.shape[0] < self.min_obs_size:
-        #         continue
-        #     mid_bl = c[c.shape[0]//2]               # midpoint in base_link
-        #     # dists = np.linalg.norm(c, axis=1)
-        #     # mid_bl = c[np.argmin(dists)]   # 用 cluster 最靠近 ego 的点
-
-        #     mid_map = self._transform_xy(mid_bl.reshape(1,2), H_map_bl)[0]  # 1x2 -> 2
-        #     # Frenet from map XY
-        #     s_arr, d_arr = self.converter.get_frenet(
-        #         np.atleast_1d(mid_map[0]).astype(np.float64),
-        #         np.atleast_1d(mid_map[1]).astype(np.float64)
-        #     )
-        #     s, d = float(s_arr[0]), float(d_arr[0])
-
-        #     if self.is_track_boundary(s, d):
-        #         continue
-
-        #     kept_clusters_bl.append(c)
-        #     mids_map.append((mid_map[0], mid_map[1]))
-        #     mids_sd.append((s, d))
+        # after you have H_map_bl and yaw_map_from_bl
+        if self.viz_clusters:
+            self.publish_cluster_debug(clusters, H_map_bl)
 
         for c in clusters:
-            # 1) 太小的簇直接跳过
             if c.shape[0] < self.min_obs_size:
                 continue
 
@@ -903,7 +1307,8 @@ class Detect(Node):
             s_c = s_c.astype(np.float64)
             d_c = d_c.astype(np.float64)
 
-            idx_best = int(np.argmax(np.abs(d_c)))
+            # idx_best = int(np.argmax(np.abs(d_c)))
+            idx_best = int(np.argmin(np.abs(d_c)))
             s_best = float(s_c[idx_best])
             d_best = float(d_c[idx_best])
             best_map = pts_map_c[idx_best]                   # (x, y) in map
@@ -912,14 +1317,18 @@ class Detect(Node):
             filtered_as_wall = False
 
             # --- Static map subtraction: skip clusters lying on precomputed walls ---
-            if self.is_static_background(s_best, d_best):
-                filtered_as_wall = True
+            if self.use_static_map:
+                if self.is_static_background(s_best, d_best):
+                    filtered_as_wall = True
+                    
+                # --- Track boundary check: skip clusters outside track boundaries ---
+                elif self.is_track_boundary(s_best, d_best):
+                    filtered_as_wall = True
+            else:
+                if self.is_track_boundary(s_best, d_best):
+                    filtered_as_wall = True
+                # pass
                 
-            # --- Track boundary check: skip clusters outside track boundaries ---
-            elif self.is_track_boundary(s_best, d_best):
-                filtered_as_wall = True
-                
-            # # debug log BEFORE continue
             # self.debug_cls_s.append(s_best)
             # self.debug_cls_d.append(d_best)
             # self.debug_cls_kept.append(0 if filtered_as_wall else 1)
@@ -927,19 +1336,16 @@ class Detect(Node):
             # self.debug_cls_y.append(float(best_map[1]))
 
             if not filtered_as_wall:
-                # 1) 这个障碍点的真实 map 坐标
                 self.debug_cls_s.append(s_best)
                 self.debug_cls_d.append(d_best)
                 self.debug_cls_x.append(float(best_map[0]))
                 self.debug_cls_y.append(float(best_map[1]))
                 self.debug_cls_kept.append(1)
 
-                # 2) 同 s_best 的 centerline 点
                 x_center, y_center = self.converter.get_cartesian(s_best, 0.0)
                 self.debug_map_center_x.append(float(x_center))
                 self.debug_map_center_y.append(float(y_center))
 
-                # 3) track boundary（几何墙）
                 idx_tr = bisect_left(self.s_array, s_best)
                 if idx_tr:
                     idx_tr -= 1
@@ -954,7 +1360,6 @@ class Detect(Node):
                 self.debug_map_geomwall_x.append(float(x_geom))
                 self.debug_map_geomwall_y.append(float(y_geom))
 
-                # 4) static map 墙
                 x_static = float('nan')
                 y_static = float('nan')
                 if (self.use_static_map and
@@ -986,14 +1391,20 @@ class Detect(Node):
             # 这里用于可视化 / debug：
             # 你可以选择用 best_map / (s_best, d_best)，
             # 也可以继续用几何中心 / mid 点，这里我用 best 的，更一致。
-            mids_map.append((best_map[0], best_map[1]))
-            mids_sd.append((s_best, d_best))
+            # mids_map.append((best_map[0], best_map[1]))
+            # mids_sd.append((s_best, d_best))
 
             # 如果你更希望继续用“簇的中点”作为可视化位置，可以换成：
-            # mid_bl = c[c.shape[0] // 2]
-            # mid_map = self._transform_xy(mid_bl.reshape(1, 2), H_map_bl)[0]
-            # mids_map.append((mid_map[0], mid_map[1]))
-            # mids_sd.append((s_best, d_best))  # s,d 仍然用 best 的
+            mid_bl = c[c.shape[0] // 2]
+            mid_map = self._transform_xy(mid_bl.reshape(1, 2), H_map_bl)[0]
+            mids_map.append((mid_map[0], mid_map[1]))
+            mids_sd.append((s_best, d_best))  # s,d 仍然用 best 的
+
+        # --- Publish filtered (pre-rect) result ---
+        if self.viz_filtered_clusters:
+            # ensure self.H_map_bl points to the H_map_bl used this frame
+            self.H_map_bl = H_map_bl
+            self.publish_filtered_pre_rect(kept_clusters_bl, rep_points_map=mids_map)
 
 
         # --- 4) Fit rectangles in base_link (stable geometry) ---

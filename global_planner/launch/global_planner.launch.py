@@ -8,7 +8,7 @@ def generate_launch_description():
     map_name = LaunchConfiguration('map_name')
 
     return LaunchDescription([
-        DeclareLaunchArgument('map_name', default_value='Autodrive'),
+        DeclareLaunchArgument('map_name', default_value='Austin'),
 
         Node(
             package='global_planner',

@@ -13,7 +13,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'map_name',
-            default_value='Autodrive',   
+            default_value='Austin',   
             description='racetrack / map name'
         ),
 

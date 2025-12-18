@@ -13,8 +13,14 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'map_name',
-            default_value='Autodrive',   
+            default_value='Austin',   
             description='racetrack / map name'
+        ),
+
+        DeclareLaunchArgument(
+            "rviz_profile",
+            default_value="follow",
+            description="RViz preset: follow or global",
         ),
 
         IncludeLaunchDescription(
@@ -28,17 +34,17 @@ def generate_launch_description():
         ),
 
         IncludeLaunchDescription(
-            PathJoinSubstitution([FindPackageShare('perception'), 'launch', 'perception.launch.py']),
-        ),
-
-        IncludeLaunchDescription(PathJoinSubstitution([FindPackageShare('controller'), 'launch', 'pure_pursuit.launch.py']),
-        ),
-
-        IncludeLaunchDescription(
             PathJoinSubstitution([FindPackageShare('roboracer_utils'), 'launch', 'roboracer_utils.launch.py']),
         ),
 
         IncludeLaunchDescription(
-            PathJoinSubstitution([FindPackageShare('local_planner'), 'launch', 'local_planner.launch.py']),
+            PathJoinSubstitution([FindPackageShare('perception'), 'launch', 'perception.launch.py']),
         ),
+
+        # IncludeLaunchDescription(PathJoinSubstitution([FindPackageShare('controller'), 'launch', 'pure_pursuit.launch.py']),
+        # ),
+
+        # IncludeLaunchDescription(
+        #     PathJoinSubstitution([FindPackageShare('local_planner'), 'launch', 'local_planner.launch.py']),
+        # ),
     ])

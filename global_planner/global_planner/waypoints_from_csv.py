@@ -39,7 +39,7 @@ class GlobalWaypointsFromCsvNode(Node):
         # ----------------------------
         # Parameters
         # ----------------------------
-        self.declare_parameter("map_name", "Autodrive")
+        self.declare_parameter("map_name", "Austin")
         self.declare_parameter("frame_id", "map")
         self.declare_parameter("publish_rate", 0.5)  # Hz, 0 → publish once
 

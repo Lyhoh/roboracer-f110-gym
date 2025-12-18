@@ -44,3 +44,8 @@
     # Option B: constant targets if not using path vx (set use_path_speed_* = false)
     v_target_ego: 2.0  # 3.5, 2.0, 1.0, 2.5, 2.0 3.0
     v_target_opp: 2.0  # 3.0, 2.0, 1.0, 0.5, 2.5 1.0
+
+    # Overtake mode: follow local planner speed
+    ot_use_path_speed_ego: true
+    ot_speed_scale_ego: 2.0   # 1.0 = strict follow; 1.05 = slightly faster than planner
+
