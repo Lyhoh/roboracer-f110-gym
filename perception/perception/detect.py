@@ -5,18 +5,18 @@ from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Point
 from visualization_msgs.msg import Marker, MarkerArray
-from interfaces.msg import WaypointArray
+from roboracer_interfaces.msg import WaypointArray, ObstacleArray, Obstacle as ObstacleMessage
 import math
 from bisect import bisect_left
-import csv
-from perception.frenet_converter import FrenetConverter
+from roboracer_utils.frenet_converter import FrenetConverter
 from tf_transformations import quaternion_matrix, quaternion_from_euler
 from tf2_ros import Buffer, TransformListener, LookupException, ConnectivityException, ExtrapolationException
 from rclpy.duration import Duration
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from message_filters import ApproximateTimeSynchronizer, Subscriber
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+from builtin_interfaces.msg import Duration as DurationMsg
 from scipy.spatial.transform import Rotation as R
 from rclpy.time import Time
+
 
 
 def normalize_s(x,track_length):
@@ -46,12 +46,17 @@ class Detect(Node):
         # Parameters
         self.declare_parameter('min_points_per_cluster', 5)
         self.declare_parameter('enable_track_filter', True)
-        self.declare_parameter('max_viewing_distance', 5.0)  #9
+        self.declare_parameter('max_viewing_distance', 9.0)  #9
         self.declare_parameter('lambda_angle', 5.0 * math.pi / 180.0)  # 5 degrees
         self.declare_parameter('sigma', 0.01)  # standard deviation for adaptive clustering
         self.declare_parameter('min_obs_size', 5)
         self.declare_parameter('min_2_points_dist', 0.1)  # minimum distance between two points to be considered an obstacle
-        self.declare_parameter('max_obs_size', 5.0)   # 10
+        self.declare_parameter('max_obs_size', 0.8)   # 10
+
+        # === Static wall map (from static_map.npz) ===
+        self.declare_parameter('use_static_map', False)
+        self.declare_parameter('static_map_path', '/home/lyh/ros2_ws/src/f110_gym/localization/static_map/static_map.npz')
+        self.declare_parameter('static_tol', 0.2)  # tolerance in d when matching wall
 
         # Load parameters
         self.tf_buffer = Buffer(cache_time=Duration(seconds=10.0))
@@ -65,14 +70,33 @@ class Detect(Node):
         self.min_2_points_dist = self.get_parameter('min_2_points_dist').get_parameter_value().double_value
         self.max_obs_size = self.get_parameter('max_obs_size').get_parameter_value().double_value
 
-        self.csv_path = '/home/lyh/ros2_ws/src/f110_gym/perception/waypoints/map5/global_waypoints.csv'
+        self.use_static_map = self.get_parameter('use_static_map').get_parameter_value().bool_value
+        self.static_map_path = self.get_parameter('static_map_path').get_parameter_value().string_value
+        self.static_tol = self.get_parameter('static_tol').get_parameter_value().double_value
+
+        self.static_s_axis = None   # 1D array of s
+        self.static_d_left = None   # 1D array of d_left(s)
+        self.static_d_right = None  # 1D array of d_right(s)
+
+        if self.use_static_map:
+            self._load_static_map(self.static_map_path)
+
+        # marker_qos = QoSProfile(
+        #     reliability=ReliabilityPolicy.RELIABLE,
+        #     durability=QoSDurabilityPolicy.VOLATILE,
+        #     # history=HistoryPolicy.KEEP_LAST,
+        #     depth=10
+        # )
 
         # Publishers
-        self.pub_markers = self.create_publisher(MarkerArray, '/opponent_detection/markers', 10)   
-        self.pub_boundaries = self.create_publisher(Marker, '/opponent_detection/boundaries', 10)
-        self.pub_breakpoints_markers = self.create_publisher(MarkerArray, '/opponent_detection/breakpoints', 10)
-        # self.pub_debug = self.create_publisher(MarkerArray, '/opponent_detection/track_debug', 10)
-        # self.pub_object = self.create_publisher(MarkerArray, '/opponent_detection/object_markers', 10)
+        self.pub_markers = self.create_publisher(MarkerArray, '/perception/markers', 10)   
+        self.pub_boundaries = self.create_publisher(Marker, '/perception/boundaries', 10)
+        self.pub_breakpoints_markers = self.create_publisher(MarkerArray, '/perception/breakpoints', 10)
+        self.pub_obstacles_message = self.create_publisher(ObstacleArray, '/perception/raw_obstacles', 10)
+        self.pub_static_walls = self.create_publisher(MarkerArray, '/perception/static_walls', 10)
+
+        self.pub_frenet_debug = self.create_publisher(MarkerArray, "/perception/frenet_debug", 1)
+
 
         sensor_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -80,10 +104,17 @@ class Detect(Node):
             depth=5
         )
 
+        wp_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+
         # Subscribers
         self.create_subscription(LaserScan, '/scan', self.laser_callback, sensor_qos)    # 10
         self.create_subscription(Odometry, '/ego_racecar/odom', self.odom_callback, 10)
-        # self.create_subscription(WaypointsMsg, '/global_waypoints', self.path_callback, 10)
+        self.create_subscription(WaypointArray, '/global_centerline', self.path_callback, wp_qos)
 
         # States
         self.current_stamp = None
@@ -99,18 +130,49 @@ class Detect(Node):
         self.smallest_d = 0.0
         self.biggest_d = 0.0
         self.path_needs_update = False
-        self.boundary_inflation = 0.1  
+        self.boundary_inflation = 0.5 # 0.1, 0.3
+        self.H_map_bl = None
+        self.t_map_bl = None  # rclpy.time.Time of the cached transform
+        self.prev_ids = set()
+        self.prev_ids_obs = set()
+
+        self.ema_alpha = 0.6
+        self.prev_center = {}   # id -> (x,y)
 
         self.scan = None
         self.tracked_obstacles = []
 
         # initialize frenet converter
         self.converter = None
-        self.path_callback(None) 
+
+        # === Debug logging for detected obstacles ===
+        self.debug_obs_x = []
+        self.debug_obs_y = []
+        self.debug_obs_s = []
+        self.debug_obs_d = []
+        # Debug track boundaries (full left/right walls in map frame)
+        self.debug_track_left_x = None
+        self.debug_track_left_y = None
+        self.debug_track_right_x = None
+        self.debug_track_right_y = None
+        # === Debug: clustering-level (s,d) used for wall decision ===
+        self.debug_cls_s = []      # all s_best
+        self.debug_cls_d = []      # all d_best
+        self.debug_cls_kept = []   # 1=kept as obstacle, 0=filtered as wall
+        self.debug_cls_x = []      # best_map.x in map frame
+        self.debug_cls_y = []      # best_map.y in map frame
+        # debug: mapping for each kept cluster
+        self.debug_map_center_x = []
+        self.debug_map_center_y = []
+        self.debug_map_geomwall_x = []
+        self.debug_map_geomwall_y = []
+        self.debug_map_staticwall_x = []
+        self.debug_map_staticwall_y = []
+
 
     def laser_callback(self, scan):
         self.scan = scan
-        # self.detect()
+        self.detect()
 
     def odom_callback(self, odom):
         '''Get car pose and convert to Frenet coordinates.'''
@@ -136,80 +198,239 @@ class Detect(Node):
             d = float(d_arr[0])
             self.car_s = s
 
-        self.detect()
+        H_odom_bl = quaternion_matrix([q.x, q.y, q.z, q.w])
+        H_odom_bl[0,3] = x
+        H_odom_bl[1,3] = y
+        H_odom_bl[2,3] = self.car_pose.position.z
 
-    def path_callback(self, path):
-        """Initialize track arrays from global waypoints.
-           For now, load from CSV. Later, replace with msg parsing."""
-        # print("path callback")
-        with open(self.csv_path, "r") as f:
-            reader = csv.reader(f)
-            header = [h.strip() for h in next(reader)]
-            cols = {h: i for i, h in enumerate(header)}
-            rows = list(reader)     
-        
-        # if (self.s_array is None or self.path_needs_update) and self.converter is not None:
-        if (self.s_array is None or self.path_needs_update) is not None:
-            xs, ys, ss, dl, dr = [], [], [], [], []
-            points=[]
-            self.s_array = []
-            self.d_right_array = []
-            self.d_left_array = []
+        H_map_odom = np.eye(4, dtype=np.float64)
 
-            for row in rows:
-                xs.append(float(row[cols["x_m"]]))
-                ys.append(float(row[cols["y_m"]]))
-            self.waypoints = np.column_stack([xs, ys]).astype(np.float64)
-            self.converter = FrenetConverter(self.waypoints[:, 0], self.waypoints[:, 1])
-            # for waypoint in path:
-            for row in rows:
-                if not row:
-                    continue
-                # xs.append(float(row[cols["x_m"]]))
-                # ys.append(float(row[cols["y_m"]]))                 
-                ss.append(float(row[cols["s_m"]]))
-                dl.append(float(row[cols["d_left"]]))
-                dr.append(float(row[cols["d_right"]]))
-                resp = self.converter.get_cartesian(float(row[cols["s_m"]]), -float(row[cols["d_right"]]) + self.boundary_inflation)
-                points.append(Point(x=resp[0], y=resp[1], z=0.0))
-                resp = self.converter.get_cartesian(float(row[cols["s_m"]]), float(row[cols["d_left"]]) - self.boundary_inflation)
-                points.append(Point(x=resp[0], y=resp[1], z=0.0))
+        self.H_map_bl = H_map_odom @ H_odom_bl
+        self.t_map_bl = Time.from_msg(self.current_stamp)  # odom.header.stamp
 
-            self.s_array = np.array(ss, dtype=np.float64)
-            self.d_left_array = np.maximum(np.array(dl, dtype=np.float64) - self.boundary_inflation, 0.0)
-            self.d_right_array = np.maximum(np.array(dr, dtype=np.float64) - self.boundary_inflation, 0.0)
-            self.smallest_d = min(self.d_right_array + self.d_left_array)
-            self.biggest_d = max(self.d_right_array + self.d_left_array)
-            self.track_length = float(self.s_array[-1])
+    def debug_frenet_consistency(self, xs, ys):
+        """Check consistency of converter.get_frenet & get_cartesian on centerline."""
+        if self.converter is None:
+            self.get_logger().warn("converter is None, cannot debug Frenet.")
+            return
 
-            marker = Marker()
-            marker.header.frame_id = "map"
-            marker.header.stamp = self.get_clock().now().to_msg()
-            marker.id = 0
-            marker.type = marker.SPHERE_LIST
-            marker.scale.x = 0.2
-            marker.scale.y = 0.2
-            marker.scale.z = 0.2  #0.02
-            marker.color.a = 1.
-            marker.color.g = 0.
-            marker.color.r = 1.
-            marker.color.b = 0.
-            marker.points = points
+        max_d = 0.0
+        max_pos_err = 0.0
 
-            self.pub_boundaries.publish(marker)
+        N = len(xs)
+        step = max(1, N // 20)  # sample about 20 points
+
+        for i in range(0, N, step):
+            x_i = float(xs[i])
+            y_i = float(ys[i])
+
+            s_arr, d_arr = self.converter.get_frenet(
+                np.atleast_1d(x_i), np.atleast_1d(y_i)
+            )
+            s_i = float(s_arr[0])
+            d_i = float(d_arr[0])
+
+            x_back, y_back = self.converter.get_cartesian(s_i, d_i)
+
+            pos_err = math.hypot(x_back - x_i, y_back - y_i)
+            max_d = max(max_d, abs(d_i))
+            max_pos_err = max(max_pos_err, pos_err)
+
+            self.get_logger().info(
+                f"[FRENET_DBG] i={i}: s={s_i:.2f}, d={d_i:.4f}, "
+                f"pos_err={pos_err:.4f}"
+            )
+
+        self.get_logger().info(
+            f"[FRENET_DBG] max |d| on centerline = {max_d:.4f}, "
+            f"max pos_err = {max_pos_err:.4f}"
+        )
+
+    def debug_s_axis(self, xs, ys, ss_raw):
+        N = len(xs)
+        step = max(1, N // 20)
+
+        for i in range(0, N, step):
+            x_i = float(xs[i])
+            y_i = float(ys[i])
+            s_msg = float(ss_raw[i])
+
+            s_arr, d_arr = self.converter.get_frenet(
+                np.atleast_1d(x_i), np.atleast_1d(y_i)
+            )
+            s_conv = float(s_arr[0])
+            d_conv = float(d_arr[0])
+
+            self.get_logger().info(
+                f"[S_AXIS] i={i}: s_msg={s_msg:.2f}, s_conv={s_conv:.2f}, "
+                f"diff={s_conv - s_msg:.2f}, d_conv={d_conv:.4f}"
+            )
+    def publish_frenet_normals(self, xs, ys):
+        if self.converter is None:
+            return
+
+        ma = MarkerArray()
+        N = len(xs)
+        # step = max(1, N // 30)
+        step = 1
+
+        for k, i in enumerate(range(0, N, step)):
+            x_i = float(xs[i])
+            y_i = float(ys[i])
+
+            # 用 converter 的 get_frenet 取出对应的 s
+            s_arr, d_arr = self.converter.get_frenet(
+                np.atleast_1d(x_i), np.atleast_1d(y_i)
+            )
+            s_i = float(s_arr[0])
+            self.get_logger().info(f"s_i: {s_i}, d_i: {d_arr[0]}")
+
+            # 在 Frenet 坐标中，取 d=0 和 d=+1.0 再 get_cartesian，连成箭头
+            x0, y0 = self.converter.get_cartesian(s_i, 0.0)
+            x1, y1 = self.converter.get_cartesian(s_i, 1.0)  # +d 方向
+
+            m = Marker()
+            m.header.frame_id = 'map'  # 或 "map"/"odom"
+            m.header.stamp = self.get_clock().now().to_msg()
+            m.ns = "frenet_normals"
+            m.id = k
+            m.type = Marker.ARROW
+            m.action = Marker.ADD
+            m.scale.x = 0.1   # shaft diameter
+            m.scale.y = 0.2   # head diameter
+            m.scale.z = 0.2   # head length
+            m.color.a = 1.0
+            m.color.r = 0.0
+            m.color.g = 0.0
+            m.color.b = 1.0
+
+            p0 = Point(x=x0, y=y0, z=0.0)
+            p1 = Point(x=x1, y=y1, z=0.0)
+            m.points = [p0, p1]
+
+            ma.markers.append(m)
+
+        self.pub_frenet_debug.publish(ma)
+
+    
+    def path_callback(self, msg: WaypointArray):
+        """Initialize track arrays from global_centerline WaypointArray."""
+
+        if msg is None or len(msg.wpnts) == 0:
+            self.get_logger().warn("global_centerline is empty.")
+            return
+
+        if self.s_array is not None and not self.path_needs_update:
+            return
+
+        xs, ys = [], []
+        ss_raw, dl_raw, dr_raw = [], [], []
+
+        for wp in msg.wpnts:
+            xs.append(float(wp.x_m))
+            ys.append(float(wp.y_m))
+            ss_raw.append(float(wp.s_m))
+            dl_raw.append(float(wp.d_left))
+            dr_raw.append(float(wp.d_right))
+
+        xs = np.array(xs, dtype=np.float64)
+        ys = np.array(ys, dtype=np.float64)
+        ss_raw = np.array(ss_raw, dtype=np.float64)
+        dl_raw = np.array(dl_raw, dtype=np.float64)
+        dr_raw = np.array(dr_raw, dtype=np.float64)
+
+        self.waypoints = np.column_stack([xs, ys]).astype(np.float64)
+        self.converter = FrenetConverter(self.waypoints[:, 0], self.waypoints[:, 1])
+
+        track_length = float(ss_raw[-1])
+        self.track_length = track_length
+
+        ds = 0.05 
+        s_dense = np.arange(0.0, track_length, ds)
+
+        s_ext = np.concatenate([ss_raw, [ss_raw[0] + track_length]])
+        dl_ext = np.concatenate([dl_raw, [dl_raw[0]]])
+        dr_ext = np.concatenate([dr_raw, [dr_raw[0]]])
+
+        dl_dense = np.interp(s_dense, s_ext, dl_ext)
+        dr_dense = np.interp(s_dense, s_ext, dr_ext)
+
+        self.s_array = s_dense
+        self.d_left_array = np.maximum(dl_dense - self.boundary_inflation, 0.0)
+        self.d_right_array = np.maximum(dr_dense - self.boundary_inflation, 0.0)
+
+        self.smallest_d = float(np.min(self.d_right_array + self.d_left_array))
+        self.biggest_d  = float(np.max(self.d_right_array + self.d_left_array))
+
+        points = []
+        left_xs, left_ys = [], []
+        right_xs, right_ys = [], []
+
+        for s_i, dl_i, dr_i in zip(self.s_array,
+                                   self.d_left_array,
+                                   self.d_right_array):
+            x_r, y_r = self.converter.get_cartesian(s_i, -dr_i)
+            right_xs.append(float(x_r))
+            right_ys.append(float(y_r))
+            points.append(Point(x=float(x_r), y=float(y_r), z=0.0))
+
+            x_l, y_l = self.converter.get_cartesian(s_i, dl_i)
+            left_xs.append(float(x_l))
+            left_ys.append(float(y_l))
+            points.append(Point(x=float(x_l), y=float(y_l), z=0.0))
+
+        # store for debug saving
+        self.debug_track_left_x = np.array(left_xs, dtype=np.float64)
+        self.debug_track_left_y = np.array(left_ys, dtype=np.float64)
+        self.debug_track_right_x = np.array(right_xs, dtype=np.float64)
+        self.debug_track_right_y = np.array(right_ys, dtype=np.float64)
+
+
+        marker = Marker()
+        marker.header.frame_id = "map"
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.id = 0
+        marker.type = marker.SPHERE_LIST
+        marker.scale.x = 0.2
+        marker.scale.y = 0.2
+        marker.scale.z = 0.2
+        marker.color.a = 1.0
+        marker.color.r = 1.0
+        marker.color.g = 0.0
+        marker.color.b = 0.0
+        marker.points = points
+
+        self.pub_boundaries.publish(marker)
+
         self.path_needs_update = False
         self.track_ready = True
+        self.get_logger().info(
+            f"global_centerline received: {len(msg.wpnts)} pts, "
+            f"track_length={self.track_length:.2f}, "
+            f"samples={len(self.s_array)}"
+        )
+        if self.use_static_map:
+            self.publish_static_walls()
 
-    # def _normalize_laser_frame(self, frame_id: str) -> str:
-    #     """Normalize laser frame; auto switch between 'laser' and 'laser_model' if needed."""
-    #     f = (frame_id or "ego_racecar/laser").strip().lstrip('/')
-    #     frames_yaml = self.tf_buffer.all_frames_as_yaml()
-    #     if f not in frames_yaml:
-    #         if f.endswith('laser') and (f + '_model') in frames_yaml:
-    #             return f + '_model'
-    #         if f.endswith('laser_model') and f.replace('_model', '') in frames_yaml:
-    #             return f.replace('_model', '')
-    #     return f
+        # self.debug_frenet_consistency(xs, ys)
+        # self.debug_s_axis(xs, ys, ss_raw)
+        # self.publish_frenet_normals(xs, ys)
+
+    def _load_static_map(self, path: str):
+        """Load precomputed static walls (s_axis, d_left, d_right) from npz."""
+        try:
+            data = np.load(path)
+            self.static_s_axis = data["s_axis"].astype(np.float64)
+            self.static_d_left = data["d_left"].astype(np.float64)
+            self.static_d_right = data["d_right"].astype(np.float64)
+            self.get_logger().info(
+                f"[static map] Loaded static walls from {path}, "
+                f"N={len(self.static_s_axis)}"
+            )
+        except Exception as e:
+            self.get_logger().warn(f"[static map] Failed to load {path}: {e}")
+            self.use_static_map = False
+
 
     def _H_from_tf(self, tf_msg):
         """Build 4x4 homogeneous transform from geometry_msgs/TransformStamped."""
@@ -235,50 +456,6 @@ class Detect(Node):
         cosy_cosp = 1.0 - 2.0*(q.y*q.y + q.z*q.z)
         return math.atan2(siny_cosp, cosy_cosp)
 
-    # def _lookup_tf_exact_or_backoff(self, target: str, source: str, t_scan: Time,
-    #                                 future_backoff_sec: float = 0.03, timeout_sec: float = 0.7):
-    #     """Try TF at scan time; if 'future extrapolation', back off slightly. Do not silently use latest."""
-    #     timeout = Duration(seconds=timeout_sec)
-
-    #     # 1) exact scan time
-    #     if self.tf_buffer.can_transform(target, source, t_scan, timeout):
-    #         return self.tf_buffer.lookup_transform(target, source, t_scan, timeout)
-
-    #     # 2) small backoff for future-extrapolation
-    #     bt = Time(nanoseconds=max(0, t_scan.nanoseconds - int(future_backoff_sec * 1e9)))
-    #     if self.tf_buffer.can_transform(target, source, bt, timeout):
-    #         return self.tf_buffer.lookup_transform(target, source, bt, timeout)
-
-    #     # 3) try latest: if latest exists, accept it as "static-like"
-    #     if self.tf_buffer.can_transform(target, source, Time(), timeout):
-    #         tf_latest = self.tf_buffer.lookup_transform(target, source, Time(), timeout)
-    #         self.get_logger().warn(
-    #             f"TF not ready for {target}<-{source} at scan/backoff; using latest as static edge."
-    #         )
-    #         return tf_latest
-
-    #     # 4) give up
-    #     self.get_logger().warn(
-    #         f"TF not ready for {target}<-{source} at scan/backoff/latest.\nKnown frames:\n"
-    #         + self.tf_buffer.all_frames_as_yaml()
-    #     )
-    #     return None
-
-    # def _lookup_tf_exact_or_backoff(self, target: str, source: str, t_scan: Time,
-    #                             future_backoff_sec: float = 0.03, timeout_sec: float = 0.7):  # 0.03
-    #     """Try TF at scan time, else small backoff for future-extrapolation; never use 'latest' silently."""
-    #     timeout = Duration(seconds=timeout_sec)
-    #     if self.tf_buffer.can_transform(target, source, t_scan, timeout):
-    #         return self.tf_buffer.lookup_transform(target, source, t_scan, timeout)
-    #     # small backoff (handles future extrapolation)
-    #     bt = Time(nanoseconds=max(0, t_scan.nanoseconds - int(future_backoff_sec*1e9)))
-    #     if self.tf_buffer.can_transform(target, source, bt, timeout):
-    #         return self.tf_buffer.lookup_transform(target, source, bt, timeout)
-    #     # give a clear log and let caller decide to drop frame
-    #     self.get_logger().warn(f"TF not ready for {target}<-{source} at scan/backoff. ")
-    #     #                    f"Known frames:\n{self.tf_buffer.all_frames_as_yaml()}")
-    #     return None
-
     def _lookup_tf_exact_or_backoff(self, target: str, source: str, t_scan: Time,
                                 future_backoff_sec: float = 0.08, timeout_sec: float = 0.08):
         """
@@ -302,9 +479,11 @@ class Detect(Node):
                 )
                 return None
 
-    def clearmarkers(self) -> MarkerArray:
+    def clearmarkers(self):
         # Create a DELETEALL marker
         m = Marker()
+        m.header.frame_id = "map"
+        m.header.stamp = self.get_clock().now().to_msg()
         m.action = Marker.DELETEALL # Clear all markers
         arr = MarkerArray()
         arr.markers.append(m)
@@ -339,7 +518,6 @@ class Detect(Node):
         pts_bl = self._transform_xy(pts_l, H_bl_l)
         return pts_bl
 
-
     def adaptive_breakpoint_clustering(self, points, d_phi):
         """Adaptive Breakpoint clustering (Amin et al., 2022)."""
         clusters = [[points[0]]]
@@ -350,18 +528,56 @@ class Detect(Node):
                 clusters.append([points[i]])
             else:
                 clusters[-1].append(points[i])
-        return [np.array(c) for c in clusters]
+        clusters = [np.array(c) for c in clusters if len(c) >= self.min_points_per_cluster]
+        # [np.array(c) for c in clusters]
+        return clusters
     
     def is_track_boundary(self, s, d):
         """Check if the point (s, d) is on the track boundary."""
-        if normalize_s(s - self.car_s, self.track_length) > self.max_viewing_distance:
-            # print("s out of range")
-            return True
+
+        ds = normalize_s(s - self.car_s, self.track_length)
+        # if ds < 0 or ds > self.max_viewing_distance:
+        #     return True
+        # if normalize_s(s - self.car_s, self.track_length) > self.max_viewing_distance:
+        #     # print("s out of range")
+        #     return True
         idx = bisect_left(self.s_array, s)
         if idx:
             idx -= 1
+        # if d <= -self.d_right_array[idx] or d >= self.d_left_array[idx]:
         if d <= -self.d_right_array[idx] or d >= self.d_left_array[idx]:
+            # self.get_logger().info(f"Point at s={s:.2f}, d={d:.2f} is out of boundary: d_left={self.d_left_array[idx]:.2f}, d_right={-self.d_right_array[idx]:.2f}")
             return True
+        return False
+    
+    def is_static_background(self, s: float, d: float) -> bool:
+        """Check if (s,d) lies on precomputed static wall (left/right)."""
+        if (not self.use_static_map or
+            self.static_s_axis is None or
+            self.static_d_left is None or
+            self.static_d_right is None):
+            return False
+
+        # wrap s to [0, track_length)
+        if self.track_length > 0.0:
+            s_wrapped = s % self.track_length
+        else:
+            s_wrapped = s
+
+        # find nearest index in static_s_axis
+        idx = np.searchsorted(self.static_s_axis, s_wrapped) - 1
+        idx = np.clip(idx, 0, len(self.static_s_axis) - 1)
+
+        dL = self.static_d_left[idx]
+        dR = self.static_d_right[idx]
+
+        tol = self.static_tol
+
+        if not np.isnan(dL) and abs(d - dL) < tol:
+            return True
+        if not np.isnan(dR) and abs(d - dR) < tol:
+            return True
+
         return False
     
     def fit_rectangle(self, objects_pointcloud_list):    
@@ -450,18 +666,79 @@ class Detect(Node):
             center = corner1 + 0.5*colVec + 0.5*orthVec
 
             current_obstacle_array.append(Obstacle(center[0], center[1], np.linalg.norm(colVec), theta_opt))
+            # # center position: 只用可见边的中点，不再加 orthVec
+            # center_edge = corner1 + 0.5 * colVec
+
+            # # 可选：沿着“从车指向障碍”的方向稍微外推一点，近似真实车中心
+            # # 这里假设激光在 ego_racecar/base_link 原点，cluster 是“近边”
+            # vec_to_edge = center_edge
+            # dist_edge = np.linalg.norm(vec_to_edge)
+            # if dist_edge > 1e-6:
+            #     dir_radial = vec_to_edge / dist_edge
+            # else:
+            #     dir_radial = np.array([1.0, 0.0])  # fallback
+
+            # half_width = 0.25  # 对方车“半宽”（m），可以按实际车宽调
+            # center = center_edge + half_width * dir_radial
+
+            # # 大小：用可见边长度作为 size，并且做个夹紧，防止异常跳变
+            # raw_size = np.linalg.norm(colVec)
+            # size = float(np.clip(raw_size, 0.3, 0.5))  # 下限/上限可按比赛车尺寸调
+
+            # current_obstacle_array.append(
+            #     Obstacle(center[0], center[1], size, theta_opt)
+            # )
+
 
         return current_obstacle_array
+    
+    def publish_obstacles_message(self):
+        obstacles_array_message = ObstacleArray()
+        obstacles_array_message.header.stamp = self.current_stamp
+        obstacles_array_message.header.frame_id = "map"  
+
+        x_center = []
+        y_center = []
+        for obstacle in self.tracked_obstacles:
+            x_center.append(obstacle.center_x)
+            y_center.append(obstacle.center_y)
+
+        s_points, d_points = self.converter.get_frenet(np.array(x_center), np.array(y_center))
+
+        # === debug log: save all detected obstacles' (x,y,s,d) ===
+        self.debug_obs_x.append(x_center.copy())
+        self.debug_obs_y.append(y_center.copy())
+        self.debug_obs_s.append(s_points.copy())
+        self.debug_obs_d.append(d_points.copy())
+
+        for idx, obstacle in enumerate(self.tracked_obstacles):
+            s = s_points[idx]
+            d = d_points[idx]
+
+            obsMsg = ObstacleMessage()
+            obsMsg.id = obstacle.id
+            obsMsg.s_start = s - obstacle.size/2
+            obsMsg.s_end = s + obstacle.size/2
+            obsMsg.d_left = d + obstacle.size/2
+            obsMsg.d_right = d - obstacle.size/2
+            obsMsg.s_center = s
+            obsMsg.d_center = d
+            obsMsg.size = obstacle.size
+
+            obstacles_array_message.obstacles.append(obsMsg)
+        self.pub_obstacles_message.publish(obstacles_array_message)
 
     def publish_markers(self):
         arr = MarkerArray()
+        # new_ids = set()
 
         for i, obs in enumerate(self.tracked_obstacles):
             m = Marker()
             m.header.frame_id = "map"
             m.header.stamp = self.current_stamp
             m.ns = "obstacles"
-            m.id = int(getattr(obs, "id", i))  
+            # m.id = int(getattr(obs, "id", i))
+            m.id = i
             m.type = Marker.CUBE
             m.action = Marker.ADD
             m.pose.position.x = float(obs.center_x)
@@ -480,16 +757,32 @@ class Detect(Node):
             m.color.r = 1.0
             m.color.g = 0.0
             m.color.b = 0.0
+            m.lifetime = DurationMsg(sec=0, nanosec=int(0.05 * 1e9))
 
             arr.markers.append(m)
+        #     new_ids.add(i)
 
+        # vanished_ids = self.prev_ids - new_ids
+        # self.get_logger().info(f"Vanished IDs: {vanished_ids}")
+        # for vid in vanished_ids:
+        #     m = Marker()
+        #     m.header.frame_id = "map"
+        #     m.header.stamp = self.current_stamp
+        #     m.ns = "obstacles"
+        #     m.id = vid
+        #     m.action = Marker.DELETE
+            # arr.markers.append(m)
+
+        # self.prev_ids = new_ids
         self.pub_markers.publish(self.clearmarkers()) 
         self.pub_markers.publish(arr)
-        Obstacle.current_id = 0
+
+        # Obstacle.current_id = 0
 
     def publish_obstacles(self, xy, sd):
         arr = MarkerArray()
         stamp = self.get_clock().now().to_msg()
+        # new_ids = set()
 
         for i in range(len(xy)):
             x, y = xy[i]  
@@ -507,25 +800,24 @@ class Detect(Node):
             m.pose.position.x = float(x)
             m.pose.position.y = float(y)
             m.pose.orientation.w = 1.0
+            m.lifetime = DurationMsg(sec=0, nanosec=int(0.05 * 1e9))
             arr.markers.append(m)
+            # new_ids.add(i)
 
-            # t = Marker()
-            # t.header.frame_id = 'map' # "ego_racecar/base_link"
-            # t.header.stamp = stamp
-            # t.ns = "obstacles_text"
-            # t.id = 1000 + i      
-            # t.action = Marker.ADD
-            # t.type = Marker.TEXT_VIEW_FACING
-            # t.scale.z = 0.1        
-            # t.color.a = 1.0; t.color.r = 1.0; t.color.g = 1.0; t.color.b = 1.0
-            # t.pose.position.x = float(x)
-            # t.pose.position.y = float(y)
-            # t.pose.position.z = 0.5 
-            # t.pose.orientation.w = 1.0
-            # t.text = f"s={s:.1f},d={d:.1f}"
-            # arr.markers.append(t)
+        # vanished_ids = self.prev_ids_obs - new_ids
+        # self.get_logger().info(f"Vanished IDs (mid): {vanished_ids}")
+        # for vid in vanished_ids:
+        #     m = Marker()
+        #     m.header.frame_id = "map"
+        #     m.header.stamp = stamp
+        #     m.ns = "obstacles_mid"
+        #     m.id = vid
+        #     m.action = Marker.DELETE
+        #     arr.markers.append(m)
 
-        self.pub_breakpoints_markers.publish(arr)
+        # self.prev_ids_obs = new_ids
+        # self.pub_breakpoints_markers.publish(self.clearmarkers())
+        # self.pub_breakpoints_markers.publish(arr)
 
     def publish_track_boundaries(self):
         if self.car_s is None: 
@@ -585,6 +877,66 @@ class Detect(Node):
 
         self.pub_breakpoints_markers.publish(arr)
 
+    def publish_static_walls(self):
+        """Visualize static_map walls as line strips in map frame."""
+        if (not self.use_static_map or
+            self.static_s_axis is None or
+            self.static_d_left is None or
+            self.static_d_right is None or
+            self.converter is None):
+            return
+
+        stamp = self.get_clock().now().to_msg()
+        arr = MarkerArray()
+
+        left_marker = Marker()
+        left_marker.header.frame_id = "map"
+        left_marker.header.stamp = stamp
+        left_marker.ns = "static_walls_left"
+        left_marker.id = 20001
+        left_marker.type = Marker.LINE_STRIP
+        left_marker.action = Marker.ADD
+        left_marker.scale.x = 0.05      # 线宽
+        left_marker.color.a = 1.0
+        left_marker.color.r = 0.1
+        left_marker.color.g = 0.9
+        left_marker.color.b = 0.1
+
+        right_marker = Marker()
+        right_marker.header.frame_id = "map"
+        right_marker.header.stamp = stamp
+        right_marker.ns = "static_walls_right"
+        right_marker.id = 20002
+        right_marker.type = Marker.LINE_STRIP
+        right_marker.action = Marker.ADD
+        right_marker.scale.x = 0.05
+        right_marker.color.a = 1.0
+        right_marker.color.r = 0.1
+        right_marker.color.g = 0.1
+        right_marker.color.b = 0.9
+
+        for s, dL, dR in zip(self.static_s_axis,
+                             self.static_d_left,
+                             self.static_d_right):
+
+            if not np.isnan(dL):
+                xL, yL = self.converter.get_cartesian(float(s), float(dL))
+                left_marker.points.append(
+                    Point(x=float(xL), y=float(yL), z=0.0)
+                )
+
+            if not np.isnan(dR):
+                xR, yR = self.converter.get_cartesian(float(s), float(dR))
+                right_marker.points.append(
+                    Point(x=float(xR), y=float(yR), z=0.0)
+                )
+
+        arr.markers.append(left_marker)
+        arr.markers.append(right_marker)
+
+        self.pub_static_walls.publish(arr)
+
+
     def detect(self):
         """Detect obstacles with clustering in base_link, Frenet check in map, publish in map."""
         if self.converter is None or self.car_s is None or self.scan is None:
@@ -602,46 +954,143 @@ class Detect(Node):
         # --- 2) Cluster in base_link ---
         clusters = self.adaptive_breakpoint_clustering(pts_bl, self.scan.angle_increment)
 
-        # --- 3) For each cluster, compute its midpoint in base_link,
+        # --- 3) For each cluster, compute its representative point in base_link,
         #         transform that single point to map at scan_t,
         #         compute (s,d) via Frenet, and filter by track boundary ---
         kept_clusters_bl = []
         mids_map = []   # store (x,y) in map for later visualization if desired
         mids_sd   = []  # store (s,d) for later publishing
 
-        # TF: map <- base_link at scan_t (strict time alignment)
-        tf_map_from_bl = self._lookup_tf_exact_or_backoff("map", "ego_racecar/base_link", scan_t)
-        if tf_map_from_bl is None:
-            self.get_logger().warn('returning from tf_map_from_bl is None')
-            return
-        self.get_logger().info('tf_map_from_bl is found')
-        H_map_bl = self._H_from_tf(tf_map_from_bl)
+        MAX_STALENESS_NS = int(0.12 * 1e9)
+
+        use_cached = (self.H_map_bl is not None and self.t_map_bl is not None
+                      and abs(scan_t.nanoseconds - self.t_map_bl.nanoseconds) <= MAX_STALENESS_NS) 
+        if use_cached:
+            # self.get_logger().info('using cached H_map_bl')
+            H_map_bl = self.H_map_bl
+            yaw_map_from_bl = self._quat_to_yaw(self.car_pose.orientation)
+        else:
+            # TF: map <- base_link
+            tf_map_from_bl = self._lookup_tf_exact_or_backoff("map", "ego_racecar/base_link", scan_t,
+                                                              future_backoff_sec=0.1, timeout_sec=0.08)
+            if tf_map_from_bl is None:
+                self.get_logger().warn('returning from tf_map_from_bl is None')
+                return
+            self.get_logger().info('tf_map_from_bl is found')
+            H_map_bl = self._H_from_tf(tf_map_from_bl)
+            yaw_map_from_bl = self._quat_to_yaw(tf_map_from_bl.transform.rotation)
 
         for c in clusters:
             if c.shape[0] < self.min_obs_size:
                 continue
-            mid_bl = c[c.shape[0]//2]               # midpoint in base_link
-            mid_map = self._transform_xy(mid_bl.reshape(1,2), H_map_bl)[0]  # 1x2 -> 2
-            # Frenet from map XY
-            s_arr, d_arr = self.converter.get_frenet(
-                np.atleast_1d(mid_map[0]).astype(np.float64),
-                np.atleast_1d(mid_map[1]).astype(np.float64)
-            )
-            s, d = float(s_arr[0]), float(d_arr[0])
 
-            # Your boundary logic (Frenet-based). If it returns True = boundary -> skip.
-            # if self.is_track_boundary(s, d):
-            #     continue
+            pts_map_c = self._transform_xy(c, H_map_bl)      # shape (M, 2)
+            x_c = pts_map_c[:, 0].astype(np.float64)
+            y_c = pts_map_c[:, 1].astype(np.float64)
+
+            s_c, d_c = self.converter.get_frenet(x_c, y_c)   # numpy arrays
+            s_c = s_c.astype(np.float64)
+            d_c = d_c.astype(np.float64)
+
+            # idx_best = int(np.argmax(np.abs(d_c)))
+            idx_best = int(np.argmin(np.abs(d_c)))
+            s_best = float(s_c[idx_best])
+            d_best = float(d_c[idx_best])
+            best_map = pts_map_c[idx_best]                   # (x, y) in map
+
+            # self.get_logger().info(f"[DEBUG] Cluster size={c.shape[0]}, best (s,d)=({s_best:.2f}, {d_best:.2f})")
+            filtered_as_wall = False
+
+            # --- Static map subtraction: skip clusters lying on precomputed walls ---
+            if self.use_static_map:
+                if self.is_static_background(s_best, d_best):
+                    filtered_as_wall = True
+                    
+                # --- Track boundary check: skip clusters outside track boundaries ---
+                elif self.is_track_boundary(s_best, d_best):
+                    filtered_as_wall = True
+            else:
+                if self.is_track_boundary(s_best, d_best):
+                    filtered_as_wall = True
+                # pass
+                
+            # self.debug_cls_s.append(s_best)
+            # self.debug_cls_d.append(d_best)
+            # self.debug_cls_kept.append(0 if filtered_as_wall else 1)
+            # self.debug_cls_x.append(float(best_map[0]))
+            # self.debug_cls_y.append(float(best_map[1]))
+
+            if not filtered_as_wall:
+                self.debug_cls_s.append(s_best)
+                self.debug_cls_d.append(d_best)
+                self.debug_cls_x.append(float(best_map[0]))
+                self.debug_cls_y.append(float(best_map[1]))
+                self.debug_cls_kept.append(1)
+
+                x_center, y_center = self.converter.get_cartesian(s_best, 0.0)
+                self.debug_map_center_x.append(float(x_center))
+                self.debug_map_center_y.append(float(y_center))
+
+                idx_tr = bisect_left(self.s_array, s_best)
+                if idx_tr:
+                    idx_tr -= 1
+                dL_tr = float(self.d_left_array[idx_tr])
+                dR_tr = float(self.d_right_array[idx_tr])
+
+                if d_best >= 0.0:
+                    x_geom, y_geom = self.converter.get_cartesian(s_best, dL_tr)
+                else:
+                    x_geom, y_geom = self.converter.get_cartesian(s_best, -dR_tr)
+
+                self.debug_map_geomwall_x.append(float(x_geom))
+                self.debug_map_geomwall_y.append(float(y_geom))
+
+                x_static = float('nan')
+                y_static = float('nan')
+                if (self.use_static_map and
+                    self.static_s_axis is not None and
+                    self.static_d_left is not None and
+                    self.static_d_right is not None):
+
+                    s_wrapped = s_best % self.track_length
+                    idx_st = np.searchsorted(self.static_s_axis, s_wrapped) - 1
+                    idx_st = int(np.clip(idx_st, 0, len(self.static_s_axis)-1))
+
+                    dL_st = float(self.static_d_left[idx_st])
+                    dR_st = float(self.static_d_right[idx_st])
+
+                    if d_best >= 0.0 and not np.isnan(dL_st):
+                        x_static, y_static = self.converter.get_cartesian(self.static_s_axis[idx_st], dL_st)
+                    elif d_best < 0.0 and not np.isnan(dR_st):
+                        x_static, y_static = self.converter.get_cartesian(self.static_s_axis[idx_st], dR_st)
+
+                self.debug_map_staticwall_x.append(float(x_static))
+                self.debug_map_staticwall_y.append(float(y_static))
+
+
+            if filtered_as_wall:
+                continue
 
             kept_clusters_bl.append(c)
-            mids_map.append((mid_map[0], mid_map[1]))
-            mids_sd.append((s, d))
+
+            # 这里用于可视化 / debug：
+            # 你可以选择用 best_map / (s_best, d_best)，
+            # 也可以继续用几何中心 / mid 点，这里我用 best 的，更一致。
+            mids_map.append((best_map[0], best_map[1]))
+            mids_sd.append((s_best, d_best))
+
+            # 如果你更希望继续用“簇的中点”作为可视化位置，可以换成：
+            # mid_bl = c[c.shape[0] // 2]
+            # mid_map = self._transform_xy(mid_bl.reshape(1, 2), H_map_bl)[0]
+            # mids_map.append((mid_map[0], mid_map[1]))
+            # mids_sd.append((s_best, d_best))  # s,d 仍然用 best 的
+
 
         # --- 4) Fit rectangles in base_link (stable geometry) ---
         rects_bl = self.fit_rectangle(kept_clusters_bl)
 
         # --- 5) Transform rectangle centers/yaws to map at the same scan_t and publish ---
-        yaw_map_from_bl = self._quat_to_yaw(tf_map_from_bl.transform.rotation)
+        # yaw_map_from_bl = self._quat_to_yaw(tf_map_from_bl.transform.rotation)
         current_obstacles = []
         for r in rects_bl:
             if r.size > self.max_obs_size:
@@ -651,23 +1100,119 @@ class Detect(Node):
             theta_map = float(r.theta + yaw_map_from_bl)
             current_obstacles.append(Obstacle(float(c_map[0]), float(c_map[1]), float(r.size), theta_map))
 
-        self.tracked_obstacles.clear()
+        # self.tracked_obstacles.clear()
+        self.tracked_obstacles = []
         for i, ob in enumerate(current_obstacles):
             ob.id = i
             self.tracked_obstacles.append(ob)
-
+        # self.publish_track_boundaries()
         self.publish_markers()
         # Optional debug of midpoints:
         self.publish_obstacles(mids_map, mids_sd)
+        self.publish_obstacles_message()
+
+    def save_obstacle_debug(self, path_name: str = "obstacles_debug.npz"):
+        """Save logged obstacle positions (x,y,s,d) and track to an npz file."""
+        # 拼成一维数组：每帧一个小数组 -> concat
+        if self.debug_obs_x:
+            obs_x = np.concatenate(self.debug_obs_x)
+            obs_y = np.concatenate(self.debug_obs_y)
+            obs_s = np.concatenate(self.debug_obs_s)
+            obs_d = np.concatenate(self.debug_obs_d)
+        else:
+            obs_x = np.array([], dtype=np.float64)
+            obs_y = np.array([], dtype=np.float64)
+            obs_s = np.array([], dtype=np.float64)
+            obs_d = np.array([], dtype=np.float64)
+
+        # 轨道中心线（如果已知）
+        if self.waypoints is not None:
+            track_x = self.waypoints[:, 0].astype(np.float64)
+            track_y = self.waypoints[:, 1].astype(np.float64)
+        else:
+            track_x = np.array([], dtype=np.float64)
+            track_y = np.array([], dtype=np.float64)
+
+        # track boundaries (may be None if path_callback never ran)
+        if self.debug_track_left_x is not None:
+            left_x = self.debug_track_left_x
+            left_y = self.debug_track_left_y
+            right_x = self.debug_track_right_x
+            right_y = self.debug_track_right_y
+        else:
+            left_x = np.array([], dtype=np.float64)
+            left_y = np.array([], dtype=np.float64)
+            right_x = np.array([], dtype=np.float64)
+            right_y = np.array([], dtype=np.float64)
+
+        # cluster-level (s_best,d_best) and kept/filtered flag
+        if self.debug_cls_s:
+            cls_s = np.array(self.debug_cls_s, dtype=np.float64)
+            cls_d = np.array(self.debug_cls_d, dtype=np.float64)
+            cls_kept = np.array(self.debug_cls_kept, dtype=np.int8)
+            cls_x = np.array(self.debug_cls_x, dtype=np.float64)
+            cls_y = np.array(self.debug_cls_y, dtype=np.float64)
+        else:
+            cls_s = np.array([], dtype=np.float64)
+            cls_d = np.array([], dtype=np.float64)
+            cls_kept = np.array([], dtype=np.int8)
+            cls_x = np.array([], dtype=np.float64)
+            cls_y = np.array([], dtype=np.float64)
+        
+            # mapping points for each cluster
+        if self.debug_map_center_x:
+            center_x = np.array(self.debug_map_center_x, dtype=np.float64)
+            center_y = np.array(self.debug_map_center_y, dtype=np.float64)
+            geom_x = np.array(self.debug_map_geomwall_x, dtype=np.float64)
+            geom_y = np.array(self.debug_map_geomwall_y, dtype=np.float64)
+            st_x = np.array(self.debug_map_staticwall_x, dtype=np.float64)
+            st_y = np.array(self.debug_map_staticwall_y, dtype=np.float64)
+        else:
+            center_x = center_y = geom_x = geom_y = st_x = st_y = np.array([], dtype=np.float64)
+
+
+        path = '/home/lyh/ros2_ws/src/f110_gym/perception/results/' + path_name
+        np.savez(path,
+                obs_x=obs_x,
+                obs_y=obs_y,
+                obs_s=obs_s,
+                obs_d=obs_d,
+                center_x=center_x, center_y=center_y,
+                geom_x=geom_x,   geom_y=geom_y,
+                st_x=st_x,       st_y=st_y,
+                track_x=track_x,
+                track_y=track_y,
+                left_x=left_x,
+                left_y=left_y,
+                right_x=right_x,
+                right_y=right_y,
+                cls_s=cls_s,
+                cls_d=cls_d,
+                cls_kept=cls_kept,
+                cls_x=cls_x,
+                cls_y=cls_y,
+                track_length=self.track_length)
+
+        self.get_logger().info(
+            f"[debug] saved {obs_x.size} obstacle samples to {path}"
+        )
+
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = Detect()
-    # node.detect()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    # rclpy.spin(node)
+    # node.destroy_node()
+    # rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        node.get_logger().info("KeyboardInterrupt, saving obstacle debug...")
+        # node.save_obstacle_debug("obstacles_debug.npz")
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

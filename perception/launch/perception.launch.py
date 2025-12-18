@@ -3,9 +3,7 @@ from launch_ros.actions import Node, SetParameter
 
 def generate_launch_description():
     return LaunchDescription([
-
         # SetParameter(name='use_sim_time', value=True),
-
         Node(
             package='perception',
             executable='tf_bridge_map_odom',  
@@ -18,4 +16,16 @@ def generate_launch_description():
             name='detect',
             output='screen',
         ),
+        Node(
+            package='perception',
+            executable='opponent_tracker',  
+            name='opponent_tracker',
+            output='screen',
+        ),
+        # Node(
+        #     package='perception',
+        #     executable='ekf_vs_gt_monitor',  
+        #     name='ekf_vs_gt_monitor',
+        #     output='screen',
+        # ),
     ])
