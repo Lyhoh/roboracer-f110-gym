@@ -31,16 +31,16 @@ class SimpleSQPAvoidanceNode(Node):
 
         # --- Parameters ---
         self.declare_parameter('lookahead', 15.0)
-        self.declare_parameter('evasion_dist', 0.6)  # 0.6
-        self.declare_parameter('back_to_raceline_before', 3.0)  # 3.0
-        self.declare_parameter('back_to_raceline_after', 3.0)  # 3.0
+        self.declare_parameter('evasion_dist', 0.6)  
+        self.declare_parameter('back_to_raceline_before', 3.0) 
+        self.declare_parameter('back_to_raceline_after', 3.0)  
         self.declare_parameter('d_margin', 0.2)
         self.declare_parameter('avoidance_resolution', 25)
         self.declare_parameter('only_dynamic_obstacles', True)
 
         # --- Overtake speed rule ---
         self.declare_parameter('ot_min_speed_delta', 0.5)  # m/s, ego must be at least this much faster than opponent
-        self.declare_parameter('ot_speed_scale', 1.05)     # optional, slightly increase base raceline speed
+        self.declare_parameter('ot_speed_scale', 1.05)     # slightly increase base raceline speed
         self.declare_parameter('ot_speed_cap', 6.0)        # m/s, safety cap
 
         # Internal states
@@ -102,14 +102,14 @@ class SimpleSQPAvoidanceNode(Node):
 
         self.create_subscription(
             WaypointArray,
-            '/global_centerline', # 'global_raceline'
+            '/global_centerline', 
             self.raceline_wp_cb,
             10
         )
 
         self.create_subscription(
             ObstacleArray,
-            '/perception/obstacles',  # your detection/tracking output
+            '/perception/obstacles',  
             self.obstacles_cb,
             10
         )
@@ -188,7 +188,6 @@ class SimpleSQPAvoidanceNode(Node):
     def obstacles_cb(self, msg: ObstacleArray):
         """Callback for perception obstacles."""
         self.obstacles = msg
-        # self.get_logger().info(f"speed = {msg.obstacles[0].vs} m/s")
 
     # -------------------- Main loop -------------------- #
 
@@ -211,7 +210,7 @@ class SimpleSQPAvoidanceNode(Node):
         resolution = int(self.get_parameter('avoidance_resolution').value)
         only_dyn = bool(self.get_parameter('only_dynamic_obstacles').value)
 
-        # Optional cooldown: do not start a new overtake immediately after finishing
+        # Cooldown: do not start a new overtake immediately after finishing
         if self.ot_cooldown_until_s is not None:
             ds_cd = (self.ot_cooldown_until_s - cur_s) % self.scaled_max_s
             if ds_cd < self.scaled_max_s / 2:
@@ -238,11 +237,6 @@ class SimpleSQPAvoidanceNode(Node):
 
         # ---------- Guard: no obstacle in lookahead ----------
         if len(considered_obs) == 0:
-            # self.get_logger().info(
-            #     f"[LP] use_cached={use_cached} "
-            #     f"overtake_active={self.overtake_active} "
-            #     f"obs_in_lookahead={len(considered_obs)}"
-            # )
 
             if not self.overtake_active:
                 self.publish_empty_outputs()
@@ -380,7 +374,7 @@ class SimpleSQPAvoidanceNode(Node):
             self.ot_target_s_end = None
             self.ot_last_seen_time = None
 
-            # cooldown (optional)
+            # cooldown 
             cooldown_s = float(self.get_parameter('ot_cooldown_s').value)
             self.ot_cooldown_until_s = (cur_s + cooldown_s) % self.scaled_max_s
 
@@ -432,11 +426,6 @@ class SimpleSQPAvoidanceNode(Node):
         y_array = resp[1, :]
 
         # 7) Assign a speed profile 
-        # v_profile = []
-        # for s_i in s_avoid_mod:
-        #     idx = int(np.argmin(np.abs(s_array - s_i)))
-        #     v_profile.append(wpnts[idx].vx_mps if hasattr(wpnts[idx], 'vx_mps') else 3.0)
-        # v_profile = np.array(v_profile, dtype=float)
 
         v_profile = np.interp(
             s_avoid_mod,
@@ -449,10 +438,6 @@ class SimpleSQPAvoidanceNode(Node):
         ot_speed_scale     = float(self.get_parameter('ot_speed_scale').value)
         ot_speed_cap       = float(self.get_parameter('ot_speed_cap').value)
 
-        # Opponent longitudinal speed in Frenet s (vs). Make it non-negative for safety.
-        # opp_vs = float(getattr(target_obs, "vs", 0.0))
-        # opp_vs = max(0.0, opp_vs)
-
         # 1) start from base profile (raceline) and optionally scale it up a bit
         v_profile = v_profile * ot_speed_scale
 
@@ -464,12 +449,6 @@ class SimpleSQPAvoidanceNode(Node):
         v_profile = np.clip(v_profile, 0.0, ot_speed_cap)
 
         # v_mean = float(np.mean(v_profile)) if len(v_profile) > 0 else 0.0
-
-        # self.get_logger().info(
-        #     f"[Overtake] Opponent vs = {opp_vs:.2f} m/s | "
-        #     f"Planned ego v_mean = {v_mean:.2f} m/s | "
-        #     f"v_min = {v_min:.2f} m/s"
-        # )
 
         self.publish_ot_waypoints(x_array, y_array, s_avoid_mod, d_profile, v_profile)
         self.publish_path(x_array, y_array)
@@ -498,55 +477,6 @@ class SimpleSQPAvoidanceNode(Node):
         delete_marker.action = Marker.DELETEALL
         marker_array.markers.append(delete_marker)
         self.marker_pub.publish(marker_array)
-
-    # def publish_ot_waypoints(self, x_array, y_array, s_array, d_array, v_array):
-    #     """Publish OTWpntArray for controller to follow."""
-    #     ot_msg = OTWpntArray()
-    #     ot_msg.header.stamp = self.get_clock().now().to_msg()
-    #     ot_msg.header.frame_id = "map"
-
-    #     wp_list = []
-    #     for i, (x, y, s_i, d_i, v_i) in enumerate(
-    #         zip(x_array, y_array, s_array, d_array, v_array)
-    #     ):
-    #         wp = Waypoint()
-    #         wp.x_m = float(x)
-    #         wp.y_m = float(y)
-    #         wp.s_m = float(s_i)
-    #         wp.d_m = float(d_i)
-    #         wp.vx_mps = float(v_i)
-    #         wp_list.append(wp)
-
-    #     ot_msg.wpnts = wp_list
-    #     self.ot_pub.publish(ot_msg)
-
-    # def publish_ot_waypoints(self, x_array, y_array, s_array, d_array, v_array):
-    #     """Publish OTWpntArray for controller to follow."""
-    #     ot_msg = OTWpntArray()
-    #     ot_msg.header.stamp = self.get_clock().now().to_msg()
-    #     ot_msg.header.frame_id = "map"
-
-    #     wp_list = []
-    #     for i, (x, y, s_i) in enumerate(zip(x_array, y_array, s_array)):
-    #         wp = Waypoint()  
-    #         wp.x_m = float(x)
-    #         wp.y_m = float(y)
-    #         wp.s_m = float(s_i)
-
-    #         # d_left / d_right 对 OT 路径来说通常没那么重要，可以：
-    #         # 方案 A: 简单设为 0
-    #         wp.d_left = 0.0
-    #         wp.d_right = 0.0
-
-    #         # 方案 B: 从 global_waypoints 用 s 找对应路点，然后拷贝那里的 d_left/d_right
-    #         # idx = int(np.argmin(np.abs(global_s_array - s_i)))
-    #         # wp.d_left  = self.global_waypoints_msg.wpnts[idx].d_left
-    #         # wp.d_right = self.global_waypoints_msg.wpnts[idx].d_right
-
-    #         wp_list.append(wp)
-
-    #     ot_msg.wpnts = wp_list
-    #     self.ot_pub.publish(ot_msg)
 
     def publish_ot_waypoints(self, x_array, y_array, s_array, d_array, v_array):
         """Publish OTWpntArray for controller to follow."""

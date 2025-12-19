@@ -40,10 +40,6 @@ import gym
 import numpy as np
 from transforms3d import euler
 
-import os
-from ament_index_python.packages import get_package_share_directory
-
-
 class GymBridge(Node):
     def __init__(self):
         super().__init__('gym_bridge')
@@ -74,39 +70,39 @@ class GymBridge(Node):
 
         # Declare all parameters with explicit types
         # String parameters (namespaces, topics, map paths, etc.)
-        self.declare_parameter('ego_namespace', Parameter.Type.STRING)          # e.g. "ego"
-        self.declare_parameter('ego_odom_topic', Parameter.Type.STRING)         # e.g. "odom"
-        self.declare_parameter('ego_opp_odom_topic', Parameter.Type.STRING)     # e.g. "opp_odom"
-        self.declare_parameter('ego_scan_topic', Parameter.Type.STRING)         # e.g. "scan"
-        self.declare_parameter('ego_drive_topic', Parameter.Type.STRING)        # e.g. "drive"
+        self.declare_parameter('ego_namespace', Parameter.Type.STRING)        
+        self.declare_parameter('ego_odom_topic', Parameter.Type.STRING)         
+        self.declare_parameter('ego_opp_odom_topic', Parameter.Type.STRING)    
+        self.declare_parameter('ego_scan_topic', Parameter.Type.STRING)        
+        self.declare_parameter('ego_drive_topic', Parameter.Type.STRING)       
 
-        self.declare_parameter('opp_namespace', Parameter.Type.STRING)          # e.g. "opp"
-        self.declare_parameter('opp_odom_topic', Parameter.Type.STRING)         # e.g. "odom"
-        self.declare_parameter('opp_ego_odom_topic', Parameter.Type.STRING)     # e.g. "ego_odom"
-        self.declare_parameter('opp_scan_topic', Parameter.Type.STRING)         # e.g. "scan"
-        self.declare_parameter('opp_drive_topic', Parameter.Type.STRING)        # e.g. "drive"
+        self.declare_parameter('opp_namespace', Parameter.Type.STRING)          
+        self.declare_parameter('opp_odom_topic', Parameter.Type.STRING)         
+        self.declare_parameter('opp_ego_odom_topic', Parameter.Type.STRING)     
+        self.declare_parameter('opp_scan_topic', Parameter.Type.STRING)         
+        self.declare_parameter('opp_drive_topic', Parameter.Type.STRING)       
 
         self.declare_parameter('map_path', Parameter.Type.STRING)              
-        self.declare_parameter('map_img_ext', Parameter.Type.STRING)            # e.g. ".png"
+        self.declare_parameter('map_img_ext', Parameter.Type.STRING)           
 
         # Numeric parameters (double / integer)
-        self.declare_parameter('scan_distance_to_base_link', Parameter.Type.DOUBLE)  # float, lidar offset
-        self.declare_parameter('scan_fov', Parameter.Type.DOUBLE)                    # float, radians
-        self.declare_parameter('scan_beams', Parameter.Type.INTEGER)                 # int, number of beams
+        self.declare_parameter('scan_distance_to_base_link', Parameter.Type.DOUBLE)  
+        self.declare_parameter('scan_fov', Parameter.Type.DOUBLE)                
+        self.declare_parameter('scan_beams', Parameter.Type.INTEGER)                
 
-        self.declare_parameter('num_agent', Parameter.Type.INTEGER)                  # int, 1 or 2
+        self.declare_parameter('num_agent', Parameter.Type.INTEGER)                
 
         # Initial poses (float)
-        self.declare_parameter('sx', Parameter.Type.DOUBLE)                          # ego start x
-        self.declare_parameter('sy', Parameter.Type.DOUBLE)                          # ego start y
-        self.declare_parameter('stheta', Parameter.Type.DOUBLE)                      # ego start yaw
+        self.declare_parameter('sx', Parameter.Type.DOUBLE)                         
+        self.declare_parameter('sy', Parameter.Type.DOUBLE)                          
+        self.declare_parameter('stheta', Parameter.Type.DOUBLE)                     
 
-        self.declare_parameter('sx1', Parameter.Type.DOUBLE)                         # opp start x
-        self.declare_parameter('sy1', Parameter.Type.DOUBLE)                         # opp start y
-        self.declare_parameter('stheta1', Parameter.Type.DOUBLE)                     # opp start yaw
+        self.declare_parameter('sx1', Parameter.Type.DOUBLE)                         
+        self.declare_parameter('sy1', Parameter.Type.DOUBLE)                         
+        self.declare_parameter('stheta1', Parameter.Type.DOUBLE)                    
 
         # Boolean
-        self.declare_parameter('kb_teleop', Parameter.Type.BOOL)                     # whether to enable /cmd_vel teleop
+        self.declare_parameter('kb_teleop', Parameter.Type.BOOL)             
 
 
         # check num_agents

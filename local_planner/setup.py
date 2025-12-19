@@ -18,8 +18,8 @@ setup(
     zip_safe=True,
     maintainer='lyh',
     maintainer_email='93693983+Lyhoh@users.noreply.github.com',
-    description='TODO: Package description',
-    license='TODO: License declaration',
+    description='Generates local trajectories for the ego vehicle, enabling overtaking maneuvers and collision avoidance based on perceived opponent states and global reference paths.',
+    license='Apache-2.0',
     extras_require={
         'test': [
             'pytest',

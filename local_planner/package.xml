@@ -3,9 +3,9 @@
 <package format="3">
   <name>local_planner</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>Generates local trajectories for the ego vehicle, enabling overtaking maneuvers and collision avoidance based on perceived opponent states and global reference paths.</description>
   <maintainer email="93693983+Lyhoh@users.noreply.github.com">lyh</maintainer>
-  <license>TODO: License declaration</license>
+  <license>Apache-2.0</license>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

@@ -18,8 +18,8 @@ setup(
     zip_safe=True,
     maintainer='lyh',
     maintainer_email='93693983+Lyhoh@users.noreply.github.com',
-    description='TODO: Package description',
-    license='TODO: License declaration',
+    description='Performs offline map processing to generate static wall representations, which are used to filter LiDAR-based perception results during runtime.',
+    license='Apache-2.0',
     extras_require={
         'test': [
             'pytest',

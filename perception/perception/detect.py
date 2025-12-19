@@ -81,12 +81,6 @@ class Detect(Node):
         if self.use_static_map:
             self._load_static_map(self.static_map_path)
 
-        # marker_qos = QoSProfile(
-        #     reliability=ReliabilityPolicy.RELIABLE,
-        #     durability=QoSDurabilityPolicy.VOLATILE,
-        #     # history=HistoryPolicy.KEEP_LAST,
-        #     depth=10
-        # )
 
         # Publishers
         self.pub_markers = self.create_publisher(MarkerArray, '/perception/markers', 10)   
@@ -94,8 +88,6 @@ class Detect(Node):
         self.pub_breakpoints_markers = self.create_publisher(MarkerArray, '/perception/breakpoints', 10)
         self.pub_obstacles_message = self.create_publisher(ObstacleArray, '/perception/raw_obstacles', 10)
         self.pub_static_walls = self.create_publisher(MarkerArray, '/perception/static_walls', 10)
-
-        self.pub_frenet_debug = self.create_publisher(MarkerArray, "/perception/frenet_debug", 1)
 
 
         sensor_qos = QoSProfile(
@@ -206,113 +198,8 @@ class Detect(Node):
         H_map_odom = np.eye(4, dtype=np.float64)
 
         self.H_map_bl = H_map_odom @ H_odom_bl
-        self.t_map_bl = Time.from_msg(self.current_stamp)  # odom.header.stamp
+        self.t_map_bl = Time.from_msg(self.current_stamp) 
 
-    def debug_frenet_consistency(self, xs, ys):
-        """Check consistency of converter.get_frenet & get_cartesian on centerline."""
-        if self.converter is None:
-            self.get_logger().warn("converter is None, cannot debug Frenet.")
-            return
-
-        max_d = 0.0
-        max_pos_err = 0.0
-
-        N = len(xs)
-        step = max(1, N // 20)  # sample about 20 points
-
-        for i in range(0, N, step):
-            x_i = float(xs[i])
-            y_i = float(ys[i])
-
-            s_arr, d_arr = self.converter.get_frenet(
-                np.atleast_1d(x_i), np.atleast_1d(y_i)
-            )
-            s_i = float(s_arr[0])
-            d_i = float(d_arr[0])
-
-            x_back, y_back = self.converter.get_cartesian(s_i, d_i)
-
-            pos_err = math.hypot(x_back - x_i, y_back - y_i)
-            max_d = max(max_d, abs(d_i))
-            max_pos_err = max(max_pos_err, pos_err)
-
-            self.get_logger().info(
-                f"[FRENET_DBG] i={i}: s={s_i:.2f}, d={d_i:.4f}, "
-                f"pos_err={pos_err:.4f}"
-            )
-
-        self.get_logger().info(
-            f"[FRENET_DBG] max |d| on centerline = {max_d:.4f}, "
-            f"max pos_err = {max_pos_err:.4f}"
-        )
-
-    def debug_s_axis(self, xs, ys, ss_raw):
-        N = len(xs)
-        step = max(1, N // 20)
-
-        for i in range(0, N, step):
-            x_i = float(xs[i])
-            y_i = float(ys[i])
-            s_msg = float(ss_raw[i])
-
-            s_arr, d_arr = self.converter.get_frenet(
-                np.atleast_1d(x_i), np.atleast_1d(y_i)
-            )
-            s_conv = float(s_arr[0])
-            d_conv = float(d_arr[0])
-
-            self.get_logger().info(
-                f"[S_AXIS] i={i}: s_msg={s_msg:.2f}, s_conv={s_conv:.2f}, "
-                f"diff={s_conv - s_msg:.2f}, d_conv={d_conv:.4f}"
-            )
-    def publish_frenet_normals(self, xs, ys):
-        if self.converter is None:
-            return
-
-        ma = MarkerArray()
-        N = len(xs)
-        # step = max(1, N // 30)
-        step = 1
-
-        for k, i in enumerate(range(0, N, step)):
-            x_i = float(xs[i])
-            y_i = float(ys[i])
-
-            # 用 converter 的 get_frenet 取出对应的 s
-            s_arr, d_arr = self.converter.get_frenet(
-                np.atleast_1d(x_i), np.atleast_1d(y_i)
-            )
-            s_i = float(s_arr[0])
-            self.get_logger().info(f"s_i: {s_i}, d_i: {d_arr[0]}")
-
-            # 在 Frenet 坐标中，取 d=0 和 d=+1.0 再 get_cartesian，连成箭头
-            x0, y0 = self.converter.get_cartesian(s_i, 0.0)
-            x1, y1 = self.converter.get_cartesian(s_i, 1.0)  # +d 方向
-
-            m = Marker()
-            m.header.frame_id = 'map'  # 或 "map"/"odom"
-            m.header.stamp = self.get_clock().now().to_msg()
-            m.ns = "frenet_normals"
-            m.id = k
-            m.type = Marker.ARROW
-            m.action = Marker.ADD
-            m.scale.x = 0.1   # shaft diameter
-            m.scale.y = 0.2   # head diameter
-            m.scale.z = 0.2   # head length
-            m.color.a = 1.0
-            m.color.r = 0.0
-            m.color.g = 0.0
-            m.color.b = 1.0
-
-            p0 = Point(x=x0, y=y0, z=0.0)
-            p1 = Point(x=x1, y=y1, z=0.0)
-            m.points = [p0, p1]
-
-            ma.markers.append(m)
-
-        self.pub_frenet_debug.publish(ma)
-
-    
     def path_callback(self, msg: WaypointArray):
         """Initialize track arrays from global_centerline WaypointArray."""
 
@@ -411,10 +298,6 @@ class Detect(Node):
         )
         if self.use_static_map:
             self.publish_static_walls()
-
-        # self.debug_frenet_consistency(xs, ys)
-        # self.debug_s_axis(xs, ys, ss_raw)
-        # self.publish_frenet_normals(xs, ys)
 
     def _load_static_map(self, path: str):
         """Load precomputed static walls (s_axis, d_left, d_right) from npz."""
@@ -529,7 +412,6 @@ class Detect(Node):
             else:
                 clusters[-1].append(points[i])
         clusters = [np.array(c) for c in clusters if len(c) >= self.min_points_per_cluster]
-        # [np.array(c) for c in clusters]
         return clusters
     
     def is_track_boundary(self, s, d):
@@ -544,9 +426,7 @@ class Detect(Node):
         idx = bisect_left(self.s_array, s)
         if idx:
             idx -= 1
-        # if d <= -self.d_right_array[idx] or d >= self.d_left_array[idx]:
         if d <= -self.d_right_array[idx] or d >= self.d_left_array[idx]:
-            # self.get_logger().info(f"Point at s={s:.2f}, d={d:.2f} is out of boundary: d_left={self.d_left_array[idx]:.2f}, d_right={-self.d_right_array[idx]:.2f}")
             return True
         return False
     
@@ -666,29 +546,6 @@ class Detect(Node):
             center = corner1 + 0.5*colVec + 0.5*orthVec
 
             current_obstacle_array.append(Obstacle(center[0], center[1], np.linalg.norm(colVec), theta_opt))
-            # # center position: 只用可见边的中点，不再加 orthVec
-            # center_edge = corner1 + 0.5 * colVec
-
-            # # 可选：沿着“从车指向障碍”的方向稍微外推一点，近似真实车中心
-            # # 这里假设激光在 ego_racecar/base_link 原点，cluster 是“近边”
-            # vec_to_edge = center_edge
-            # dist_edge = np.linalg.norm(vec_to_edge)
-            # if dist_edge > 1e-6:
-            #     dir_radial = vec_to_edge / dist_edge
-            # else:
-            #     dir_radial = np.array([1.0, 0.0])  # fallback
-
-            # half_width = 0.25  # 对方车“半宽”（m），可以按实际车宽调
-            # center = center_edge + half_width * dir_radial
-
-            # # 大小：用可见边长度作为 size，并且做个夹紧，防止异常跳变
-            # raw_size = np.linalg.norm(colVec)
-            # size = float(np.clip(raw_size, 0.3, 0.5))  # 下限/上限可按比赛车尺寸调
-
-            # current_obstacle_array.append(
-            #     Obstacle(center[0], center[1], size, theta_opt)
-            # )
-
 
         return current_obstacle_array
     
@@ -730,7 +587,6 @@ class Detect(Node):
 
     def publish_markers(self):
         arr = MarkerArray()
-        # new_ids = set()
 
         for i, obs in enumerate(self.tracked_obstacles):
             m = Marker()
@@ -760,29 +616,13 @@ class Detect(Node):
             m.lifetime = DurationMsg(sec=0, nanosec=int(0.05 * 1e9))
 
             arr.markers.append(m)
-        #     new_ids.add(i)
 
-        # vanished_ids = self.prev_ids - new_ids
-        # self.get_logger().info(f"Vanished IDs: {vanished_ids}")
-        # for vid in vanished_ids:
-        #     m = Marker()
-        #     m.header.frame_id = "map"
-        #     m.header.stamp = self.current_stamp
-        #     m.ns = "obstacles"
-        #     m.id = vid
-        #     m.action = Marker.DELETE
-            # arr.markers.append(m)
-
-        # self.prev_ids = new_ids
         self.pub_markers.publish(self.clearmarkers()) 
         self.pub_markers.publish(arr)
-
-        # Obstacle.current_id = 0
 
     def publish_obstacles(self, xy, sd):
         arr = MarkerArray()
         stamp = self.get_clock().now().to_msg()
-        # new_ids = set()
 
         for i in range(len(xy)):
             x, y = xy[i]  
@@ -790,7 +630,7 @@ class Detect(Node):
 
             m = Marker()
             m.header.stamp = stamp
-            m.header.frame_id = 'map' # "ego_racecar/base_link" 
+            m.header.frame_id = 'map' 
             m.ns = "obstacles_mid"
             m.id = i
             m.action = Marker.ADD
@@ -802,22 +642,6 @@ class Detect(Node):
             m.pose.orientation.w = 1.0
             m.lifetime = DurationMsg(sec=0, nanosec=int(0.05 * 1e9))
             arr.markers.append(m)
-            # new_ids.add(i)
-
-        # vanished_ids = self.prev_ids_obs - new_ids
-        # self.get_logger().info(f"Vanished IDs (mid): {vanished_ids}")
-        # for vid in vanished_ids:
-        #     m = Marker()
-        #     m.header.frame_id = "map"
-        #     m.header.stamp = stamp
-        #     m.ns = "obstacles_mid"
-        #     m.id = vid
-        #     m.action = Marker.DELETE
-        #     arr.markers.append(m)
-
-        # self.prev_ids_obs = new_ids
-        # self.pub_breakpoints_markers.publish(self.clearmarkers())
-        # self.pub_breakpoints_markers.publish(arr)
 
     def publish_track_boundaries(self):
         if self.car_s is None: 
@@ -896,7 +720,7 @@ class Detect(Node):
         left_marker.id = 20001
         left_marker.type = Marker.LINE_STRIP
         left_marker.action = Marker.ADD
-        left_marker.scale.x = 0.05      # 线宽
+        left_marker.scale.x = 0.05   
         left_marker.color.a = 1.0
         left_marker.color.r = 0.1
         left_marker.color.g = 0.9
@@ -1012,13 +836,6 @@ class Detect(Node):
             else:
                 if self.is_track_boundary(s_best, d_best):
                     filtered_as_wall = True
-                # pass
-                
-            # self.debug_cls_s.append(s_best)
-            # self.debug_cls_d.append(d_best)
-            # self.debug_cls_kept.append(0 if filtered_as_wall else 1)
-            # self.debug_cls_x.append(float(best_map[0]))
-            # self.debug_cls_y.append(float(best_map[1]))
 
             if not filtered_as_wall:
                 self.debug_cls_s.append(s_best)
@@ -1073,18 +890,8 @@ class Detect(Node):
 
             kept_clusters_bl.append(c)
 
-            # 这里用于可视化 / debug：
-            # 你可以选择用 best_map / (s_best, d_best)，
-            # 也可以继续用几何中心 / mid 点，这里我用 best 的，更一致。
             mids_map.append((best_map[0], best_map[1]))
             mids_sd.append((s_best, d_best))
-
-            # 如果你更希望继续用“簇的中点”作为可视化位置，可以换成：
-            # mid_bl = c[c.shape[0] // 2]
-            # mid_map = self._transform_xy(mid_bl.reshape(1, 2), H_map_bl)[0]
-            # mids_map.append((mid_map[0], mid_map[1]))
-            # mids_sd.append((s_best, d_best))  # s,d 仍然用 best 的
-
 
         # --- 4) Fit rectangles in base_link (stable geometry) ---
         rects_bl = self.fit_rectangle(kept_clusters_bl)
@@ -1113,7 +920,6 @@ class Detect(Node):
 
     def save_obstacle_debug(self, path_name: str = "obstacles_debug.npz"):
         """Save logged obstacle positions (x,y,s,d) and track to an npz file."""
-        # 拼成一维数组：每帧一个小数组 -> concat
         if self.debug_obs_x:
             obs_x = np.concatenate(self.debug_obs_x)
             obs_y = np.concatenate(self.debug_obs_y)
@@ -1125,7 +931,6 @@ class Detect(Node):
             obs_s = np.array([], dtype=np.float64)
             obs_d = np.array([], dtype=np.float64)
 
-        # 轨道中心线（如果已知）
         if self.waypoints is not None:
             track_x = self.waypoints[:, 0].astype(np.float64)
             track_y = self.waypoints[:, 1].astype(np.float64)
@@ -1133,7 +938,7 @@ class Detect(Node):
             track_x = np.array([], dtype=np.float64)
             track_y = np.array([], dtype=np.float64)
 
-        # track boundaries (may be None if path_callback never ran)
+        # track boundaries 
         if self.debug_track_left_x is not None:
             left_x = self.debug_track_left_x
             left_y = self.debug_track_left_y

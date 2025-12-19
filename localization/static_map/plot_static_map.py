@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Offline visualization for static map:
 - Plot hit heatmap in (s, d)
