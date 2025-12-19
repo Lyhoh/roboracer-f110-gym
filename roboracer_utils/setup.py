@@ -18,8 +18,8 @@ setup(
     zip_safe=True,
     maintainer='lyh',
     maintainer_email='93693983+Lyhoh@users.noreply.github.com',
-    description='TODO: Package description',
-    license='TODO: License declaration',
+    description='Provides shared utility functions, including coordinate transformations and common mathematical tools, used across multiple Roboracer packages.',
+    license='Apache-2.0',
     extras_require={
         'test': [
             'pytest',

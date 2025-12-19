@@ -77,7 +77,7 @@ class SingleOpponentKF:
 
         # Path reference (for target velocity)
         self.global_waypoints: Optional[List] = None  
-        self.wp_step_inv: float = 10.0  # index = int(s * wp_step_inv) like original
+        self.wp_step_inv: float = 10.0 
 
         # Simple smoothing for vs/vd outputs
         self.vs_hist = []
@@ -137,8 +137,6 @@ class SingleOpponentKF:
     def initialize_from_two(self, s2: float, s1: float, d2: float, d1: float, dt: float):
         """Initialize state using two consecutive detections."""
         dt = float(np.clip(dt, 1e-4, 0.5))
-        # vs = (wrap_s_residual(s2 - s1, self.track_length) * self.rate)
-        # vd = (d2 - d1) * self.rate
         vs = wrap_s_residual(s2 - s1, self.track_length) / dt
         vd = (d2 - d1) / dt
         vs = float(np.clip(vs, -5.0, 5.0))  # -5.0 ~ 5.0
@@ -153,7 +151,6 @@ class SingleOpponentKF:
         s, vs, d, vd = self.ekf.x
         if self.use_target_vel:
             v_tgt = self._v_target_from_path(s)
-            # Control vector u = [0, P_vs*(v_tgt - vs), -P_d*d, -P_vd*vd]
             u = np.array([0.0, self.P_vs * (v_tgt - vs), -self.P_d * d, -self.P_vd * vd], dtype=float)
         else:
             # when blind, softly damp longitudinal speed to 0
@@ -421,20 +418,6 @@ class OpponentTrackerNode(Node):
                 self.prev_meas_t = t_meas
                 return
             
-            # # --- frame-to-frame raw speed check ---
-            # if self.prev_s is not None:
-            #     ds_frame = wrap_s_residual(s_meas - self.prev_s, self.track_length)
-            #     vs_frame = ds_frame / dt_meas  # [m/s] based purely on two measurements
-
-            #     if abs(vs_frame) > self.frame_v_max or vs_frame < -2.0:
-            #         # This measurement implies an unrealistically high speed -> likely jump to another object
-            #         self.get_logger().debug(
-            #             f"[OpponentTracker] skip frame: |v_frame|={abs(vs_frame):.2f} > {self.frame_v_max:.2f}"
-            #         )
-            #         # IMPORTANT: do NOT update prev_s / prev_d / prev_meas_t here,
-            #         # so that the next valid measurement is still compared to the last accepted one.
-            #         return
-            
             # Initialize EKF
             self.tracker.initialize_from_two(s_meas, self.prev_s, d_meas, self.prev_d, dt_meas)
             self.has_target = True
@@ -588,7 +571,7 @@ class OpponentTrackerNode(Node):
             return
 
         m = Marker()
-        m.header.frame_id = 'map'  # adjust to your world frame
+        m.header.frame_id = 'map'  
         m.header.stamp = self.get_clock().now().to_msg()
         m.id = 1
         m.type = Marker.SPHERE
@@ -596,9 +579,6 @@ class OpponentTrackerNode(Node):
         m.scale.y = 0.5
         m.scale.z = 0.5
         m.color.a = 1.0 # 0.8
-        # m.color.r = 1.0 # if self.has_target else 1.0
-        # m.color.g = 0.0 # if self.has_target else 0.3
-        # m.color.b = 0.0 # if self.has_target else 0.8
         if self.class_label is False:          # dynamic: red
             m.color.r = 1.0; m.color.g = 0.0; m.color.b = 0.0   
         elif self.class_label is True:         # static: blue
@@ -606,9 +586,6 @@ class OpponentTrackerNode(Node):
         else:                                  # unknown: yellow
             m.color.r = 1.0; m.color.g = 1.0; m.color.b = 0.0   
 
-        # Convert Frenet (s,d) to map (x,y) only if you have a converter.
-        # Here we just place a sphere along s on x-axis as a placeholder.
-        # Replace this with your Frenet->Cartesian converter.
         s = float(self.tracker.ekf.x[0])
         d = float(self.tracker.ekf.x[2])
         m.pose.position.x, m.pose.position.y = self.converter.get_cartesian(s, d)
@@ -641,7 +618,6 @@ class OpponentTrackerNode(Node):
         o.s_center = normalize_s(s, self.track_length) if self.track_length else s
         o.d_center = d
 
-        # size unknown here; fill if your detector provides
         o.size = 0.3
 
         # simple band for s-interval & d-bounds
@@ -665,10 +641,6 @@ class OpponentTrackerNode(Node):
         self.pub_fused.publish(oa)
 
         ts = oa.header.stamp.sec + oa.header.stamp.nanosec * 1e-9
-        # self.log_csv.writerow([f'{ts:.9f}', o.s_center, o.d_center, o.vs, o.vd,
-        #                     o.s_var, o.vs_var, o.d_var, o.vd_var, int(o.is_visible)])
-        # self.log_csv_file.flush()
-        # self.get_logger().info(f's={o.s_center:.2f} d={o.d_center:.2f} vs={o.vs:.2f} vd={o.vd:.2f}')
 
     def publish_raw_obstacles_markers(self, msg: ObstacleArray):
         """Visualize all raw obstacles received by the tracker."""
@@ -723,14 +695,6 @@ def main():
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
-
-    # finally:
-    #     try:
-    #         if hasattr(node, "log_csv_file") and not node.log_csv_file.closed:
-    #             node.get_logger().info(f"[OpponentTracker] Closing CSV log file.")
-    #             node.log_csv_file.close()
-    #     except Exception as e:
-    #         node.get_logger().warn(f"Error while closing CSV file: {e}")
     
     node.destroy_node()
     rclpy.shutdown()

@@ -8,14 +8,6 @@ def generate_launch_description():
     param_file = os.path.join(pkg_share, 'config', 'pure_pursuit.yaml')
 
     return LaunchDescription([
-        # SetParameter(name='use_sim_time', value=True),
-        # Node(
-        #     package='controller',
-        #     executable='pure_pursuit',
-        #     name='pure_pursuit',
-        #     output='screen',
-        #     parameters=[param_file], 
-        # ),
         Node(
             package='controller',
             executable='pp_overtake',

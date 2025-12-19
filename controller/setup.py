@@ -18,8 +18,8 @@ setup(
     zip_safe=True,
     maintainer='lyh',
     maintainer_email='93693983+Lyhoh@users.noreply.github.com',
-    description='TODO: Package description',
-    license='TODO: License declaration',
+    description='Provides control algorithms for both the ego vehicle and the opponent vehicle',
+    license='Apache-2.0',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [

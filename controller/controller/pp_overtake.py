@@ -1,8 +1,3 @@
-# Dual-vehicle Pure Pursuit controller (ROS 2, rclpy)
-# - Opponent: always follows an offset version of the base path from CSV
-# - Ego:      follows base path by default, but switches to local planner's
-#             OT path (from /planner/avoidance/otwpnts) when available.
-
 import math
 import numpy as np
 import rclpy
@@ -328,8 +323,6 @@ class DualPurePursuitNode(Node):
                 has_vx = False
                 break
         ot_vx = np.array(ot_vx, dtype=float) if (has_vx and len(ot_vx) == len(msg.wpnts)) else None
-        # self.get_logger().info(f"ot_vx = {ot_vx}")
-        # ot_vx = np.full(len(msg.wpnts), 4.0)
 
         # Force ego speed policy in overtake mode (use planner speed)
         self.ctrl_ego.use_path_speed = self.ot_use_path_speed_ego
@@ -344,10 +337,6 @@ class DualPurePursuitNode(Node):
                 f"[DualPP] Received OT path {len(ot_xy)} pts -> Ego following OT path WITH planner speed "
                 f"(mean vx={float(np.mean(ot_vx)):.2f} m/s)"
             )
-            # self.get_logger().info(
-            #     f"[DualPP] OT speed policy: use_path_speed={self.ctrl_ego.use_path_speed}, "
-            #     f"speed_scale={self.ctrl_ego.speed_scale:.2f}, v_target_max={self.ctrl_ego.v_target_max:.2f}"
-            # )
         else:
             self.get_logger().info(
                 f"[DualPP] Received OT path {len(ot_xy)} pts -> Ego following OT path (NO vx in msg, fallback speed policy)"
@@ -377,7 +366,6 @@ class DualPurePursuitNode(Node):
     def on_timer(self):
         # if not (self.per_ready and self.lp_ready and self.track_ready):
         if not (self.per_ready and self.track_ready):
-            # self.get_logger().info("Waiting for perception to be ready...")
             return
         
         now_ns = self.get_clock().now().nanoseconds

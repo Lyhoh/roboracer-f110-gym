@@ -52,15 +52,11 @@ def compute_waypoints_psi(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     Compute heading (yaw) angle psi [rad] for each waypoint based on (x, y).
     The yaw is the tangent direction of the path, measured CCW from x-axis.
     """
-    # Differentiate with wrap-around (assume racetrack is closed)
+    # Differentiate with wrap-around 
     dx = np.gradient(x, edge_order=2)
     dy = np.gradient(y, edge_order=2)
 
     psi = np.arctan2(dy, dx)  # atan2 gives angle in [-pi, pi]
-    
-    # Optional smoothing if your path is noisy
-    # psi = np.unwrap(psi)  # continuous heading
-    # psi = np.convolve(psi, np.ones(5)/5, mode='same')
 
     return psi
 
@@ -187,10 +183,6 @@ class EkfVsGtMonitor(Node):
         x = np.array([w.x_m for w in msg.wpnts], dtype=float)
         y = np.array([w.y_m for w in msg.wpnts], dtype=float)
 
-        # try:
-        #     psi = np.array([w.psi_rad for w in msg.wpnts], dtype=float)  # adjust field name if you have it
-        # except Exception:
-        #     psi = compute_waypoints_psi(x, y)
         psi = compute_waypoints_psi(x, y)
 
         self.fc = FrenetConverter(waypoints_x=x, waypoints_y=y, waypoints_psi=psi)
@@ -211,13 +203,6 @@ class EkfVsGtMonitor(Node):
         try:
             s_wp = np.array([w.s_m for w in msg.wpnts], dtype=float)
         except Exception:
-            # Fallback: approximate cumulative arc length
-            # pts = self.centerline_xy
-            # ds = np.linalg.norm(np.diff(pts, axis=0), axis=1)
-            # s_wp = np.concatenate([[0.0], np.cumsum(ds)])
-            # # normalize to track length if needed
-            # if s_wp[-1] > 1e-6:
-            #     s_wp *= float(self.fc.raceline_length) / s_wp[-1]
             pass
 
         # 2) Curvature along the centerline
@@ -352,14 +337,6 @@ class EkfVsGtMonitor(Node):
             bias = self.sum_e / self.n
             mae  = self.sum_ea / self.n
             rmse = np.sqrt(self.sum_e2 / self.n)
-            # self.get_logger().info(
-            #     f"[N={self.n}] Frenet "
-            #     f"e_s: bias={bias[0]:+.3f} mae={mae[0]:.3f} rmse={rmse[0]:.3f} | "
-            #     f"e_vs: bias={bias[1]:+.3f} mae={mae[1]:.3f} rmse={rmse[1]:.3f} | "
-            #     f"e_d: bias={bias[2]:+.3f} mae={mae[2]:.3f} rmse={rmse[2]:.3f} | "
-            #     f"e_vd: bias={bias[3]:+.3f} mae={mae[3]:.3f} rmse={rmse[3]:.3f} | "
-            #     f"Cart dist mean≈{float(np.mean(np.sqrt(self.sum_e2[2]/self.n))):.3f}"
-            # )
 
         # Use EKF stamp as x-axis
         t_ekf_sec = t_ekf.nanoseconds * 1e-9
@@ -680,9 +657,6 @@ class EkfVsGtMonitor(Node):
             "|vs-vcmd|_p95 [m/s]": vs_p95,
         }
 
-        # self.get_logger().info("=== Perception KPI (constant commanded speed) ===")
-        # for k, v in kpi.items():
-        #     self.get_logger().info(f"{k:>22}: {v}")
 
         print("=== Perception KPI (constant commanded speed) ===")
         for k, v in kpi.items():
@@ -751,7 +725,6 @@ def main():
         pass
     finally:
         try:
-            # pass
             node.run_final_evaluation()
 
         except Exception as e:

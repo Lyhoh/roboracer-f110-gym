@@ -18,8 +18,8 @@ setup(
     zip_safe=True,
     maintainer='lyh',
     maintainer_email='93693983+Lyhoh@users.noreply.github.com',
-    description='TODO: Package description',
-    license='TODO: License declaration',
+    description='Generates and publishes global reference paths, including the centerline and the optimal raceline, for autonomous racing on predefined tracks.',
+    license='Apache-2.0',
     extras_require={
         'test': [
             'pytest',

@@ -18,8 +18,8 @@ setup(
     zip_safe=True,
     maintainer='lyh',
     maintainer_email='93693983+Lyhoh@users.noreply.github.com',
-    description='TODO: Package description',
-    license='TODO: License declaration',
+    description='Contains launch files and configuration setups for bringing up the full system.',
+    license='Apache-2.0',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [

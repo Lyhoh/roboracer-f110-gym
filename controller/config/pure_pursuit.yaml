@@ -9,8 +9,6 @@
     drive_topic_opp: /opp_drive
 
     # --- Paths (same base path for both cars) ---
-    # path_csv_ego: "/home/lyh/ros2_ws/src/f110_gym/global-planning/outputs/map5/traj_race_cl.csv"
-    # path_csv_opp: ""           # unused when use_same_path=true
     use_same_path: true
 
     # --- Vehicle & controller base params ---

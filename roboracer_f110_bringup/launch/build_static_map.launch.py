@@ -29,10 +29,8 @@ def generate_launch_description():
 
         IncludeLaunchDescription(
             PathJoinSubstitution([FindPackageShare('localization'), 'launch', 'build_static_map.launch.py']),
-            # launch_arguments={'map_name': map_name}.items()
         ),
 
         IncludeLaunchDescription(PathJoinSubstitution([FindPackageShare('controller'), 'launch', 'pure_pursuit.launch.py']),
-            # launch_arguments={'map_name': map_name}.items()
         ),
     ])

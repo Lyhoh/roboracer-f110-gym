@@ -36,8 +36,8 @@ class BuildStaticMap(Node):
         self.declare_parameter("map_output", "static_map.npz")
         self.declare_parameter("s_res", 0.05)
         self.declare_parameter("d_res", 0.05)
-        self.declare_parameter("d_min", -50.0) #-4.0
-        self.declare_parameter("d_max", 50.0)  # 4.0
+        self.declare_parameter("d_min", -4.0) 
+        self.declare_parameter("d_max", 4.0) 
         self.declare_parameter("min_hits", 5)   # min hit count for a cell to be considered stable
 
         hits_output_name = self.get_parameter("hits_output").get_parameter_value().string_value
@@ -47,11 +47,6 @@ class BuildStaticMap(Node):
         self.d_min = self.get_parameter("d_min").get_parameter_value().double_value
         self.d_max = self.get_parameter("d_max").get_parameter_value().double_value
         self.min_hits = self.get_parameter("min_hits").get_parameter_value().integer_value
-
-        # pkg_share = get_package_share_directory('localization')
-        # static_map_dir = os.path.join(pkg_share, 'static_map')
-        # self.hits_output = os.path.join(static_map_dir, hits_output_name)
-        # self.map_output =  os.path.join(static_map_dir, map_output_name)
         self.hits_output = '/home/lyh/ros2_ws/src/f110_gym/localization/static_map/' + hits_output_name
         self.map_output = '/home/lyh/ros2_ws/src/f110_gym/localization/static_map/' + map_output_name
 
@@ -71,13 +66,6 @@ class BuildStaticMap(Node):
 
         self.wall_s = []
         self.wall_d = []
-
-
-        # # === Debug buffers for visualization ===
-        # self.debug_s = []
-        # self.debug_d = []
-        # self.debug_x = []
-        # self.debug_y = []
 
         # Subscribers
         self.create_subscription(WaypointArray, "/global_centerline", self.path_callback, 10)
@@ -126,14 +114,12 @@ class BuildStaticMap(Node):
     def odom_callback(self, odom: Odometry):
         """Build H_map_bl assuming map and odom are the same frame."""
         if self.static_hits is None:
-            # Track not ready yet
             return
 
         p = odom.pose.pose.position
         q = odom.pose.pose.orientation
 
         # Homogeneous transform map <- base_link
-        # Here we assume odom frame is our map frame (like in your detect.py)
         H = quaternion_matrix([q.x, q.y, q.z, q.w])
         H[0, 3] = p.x
         H[1, 3] = p.y
@@ -237,84 +223,10 @@ class BuildStaticMap(Node):
         s_arr, d_arr = self.converter.get_frenet(x, y)
         s_arr = np.mod(s_arr, self.track_length)  # wrap s to [0, track_length)
 
-        # 只保留赛道附近的点，用来拟合墙线
-        d_cut = 3.0  # 或者 4.0，看你赛道最大宽度
+        d_cut = 3.0 
         near_mask = np.abs(d_arr) < d_cut
         self.wall_s.append(s_arr[near_mask])
         self.wall_d.append(d_arr[near_mask])
-
-        # # === Debug sampling ===
-        # rand_mask = np.random.rand(len(d_arr)) < 0.02
-        # big_d_mask = np.abs(d_arr) > 5.0
-        # keep_mask = rand_mask | big_d_mask
-
-        # self.debug_s.append(s_arr[keep_mask])
-        # self.debug_d.append(d_arr[keep_mask])
-        # self.debug_x.append(x[keep_mask])
-        # self.debug_y.append(y[keep_mask])
-
-        # Ns, Nd = self.static_hits.shape
-
-        # for s, d in zip(s_arr, d_arr):
-        #     if d < self.d_min or d > self.d_max:
-        #         continue
-
-        #     i_s = int(s / self.s_res)
-        #     if i_s < 0 or i_s >= Ns:
-        #         continue
-
-        #     i_d = int((d - self.d_min) / self.d_res)
-        #     if i_d < 0 or i_d >= Nd:
-        #         continue
-
-        #     if self.static_hits[i_s, i_d] < np.iinfo(np.uint16).max:
-        #         self.static_hits[i_s, i_d] += 1
-
-        # self.get_logger().info(f"[DEBUG] d range this frame: {d_arr.min():.2f} ~ {d_arr.max():.2f}")
-
-    # def compute_static_walls(self):
-    #     """From static_hits, estimate d_left(s) and d_right(s) with simple smoothing."""
-    #     Ns, Nd = self.static_hits.shape
-    #     d_bins = self.d_bins
-
-    #     d_left = np.full(Ns, np.nan, dtype=np.float64)
-    #     d_right = np.full(Ns, np.nan, dtype=np.float64)
-
-    #     for i_s in range(Ns):
-    #         hits = self.static_hits[i_s, :]
-    #         if hits.max() < self.min_hits:
-    #             continue
-
-    #         # Left side (d > 0)
-    #         mask_left = (d_bins > 0.0) & (hits >= self.min_hits)
-    #         if np.any(mask_left):
-    #             d_left[i_s] = np.average(d_bins[mask_left], weights=hits[mask_left])
-
-    #         # Right side (d < 0)
-    #         mask_right = (d_bins < 0.0) & (hits >= self.min_hits)
-    #         if np.any(mask_right):
-    #             d_right[i_s] = np.average(d_bins[mask_right], weights=hits[mask_right])
-
-    #     # Small moving average smoothing to remove noise
-    #     def smooth_nan_aware(arr: np.ndarray, window: int = 7) -> np.ndarray:
-    #         arr_sm = arr.copy()
-    #         valid = ~np.isnan(arr)
-    #         idx_valid = np.where(valid)[0]
-    #         for idx in idx_valid:
-    #             i0 = max(0, idx - window // 2)
-    #             i1 = min(len(arr), idx + window // 2 + 1)
-    #             segment = arr[i0:i1]
-    #             seg_valid = ~np.isnan(segment)
-    #             if np.any(seg_valid):
-    #                 arr_sm[idx] = np.mean(segment[seg_valid])
-    #         return arr_sm
-
-    #     d_left_sm = smooth_nan_aware(d_left, window=7)
-    #     d_right_sm = smooth_nan_aware(d_right, window=7)
-
-    #     # return d_left_sm, d_right_sm
-    #     return d_left, d_right
-
 
     def save_all(self):
         """Save raw hits and final static wall map."""
@@ -334,66 +246,6 @@ class BuildStaticMap(Node):
                 s_res=self.s_res,
                 wall_s=all_s,
                 wall_d=all_d)
-        
-        # # === Save debug point cloud in Frenet and map coordinates ===
-        # if self.debug_s:
-        #     dbg_s = np.concatenate(self.debug_s)
-        #     dbg_d = np.concatenate(self.debug_d)
-        #     dbg_x = np.concatenate(self.debug_x)
-        #     dbg_y = np.concatenate(self.debug_y)
-        # else:
-        #     dbg_s = np.array([], dtype=np.float64)
-        #     dbg_d = np.array([], dtype=np.float64)
-        #     dbg_x = np.array([], dtype=np.float64)
-        #     dbg_y = np.array([], dtype=np.float64)
-
-        # np.savez(
-        #     self.hits_output,   # 覆盖原来的 raw 文件，顺便加调试数据
-        #     static_hits=self.static_hits,
-        #     s_axis=self.s_axis,
-        #     d_bins=self.d_bins,
-        #     s_res=self.s_res,
-        #     d_res=self.d_res,
-        #     d_min=self.d_min,
-        #     d_max=self.d_max,
-        #     track_length=self.track_length,
-        #     dbg_s=dbg_s,
-        #     dbg_d=dbg_d,
-        #     dbg_x=dbg_x,
-        #     dbg_y=dbg_y,
-        # )
-        # self.get_logger().info(
-        #     f"[build_static_map] Saved raw static hits + debug points to {self.hits_output}, "
-        #     f"dbg_points={dbg_s.size}"
-        # )
-
-
-        # # Save raw hits
-        # np.savez(
-        #     self.hits_output,
-        #     static_hits=self.static_hits,
-        #     s_axis=self.s_axis,
-        #     d_bins=self.d_bins,
-        #     s_res=self.s_res,
-        #     d_res=self.d_res,
-        #     d_min=self.d_min,
-        #     d_max=self.d_max,
-        #     track_length=self.track_length,
-        # )
-        # self.get_logger().info(f"[build_static_map] Saved raw static hits to {self.hits_output}")
-
-        # # Compute and save static map
-        # d_left, d_right = self.compute_static_walls()
-        # np.savez(
-        #     self.map_output,
-        #     s_axis=self.s_axis,
-        #     d_left=d_left,
-        #     d_right=d_right,
-        # )
-        # self.get_logger().info(
-        #     f"[build_static_map] Saved static wall map to {self.map_output} "
-        #     f"(valid left={np.sum(~np.isnan(d_left))}, valid right={np.sum(~np.isnan(d_right))})"
-        # )
 
 
 def main(args=None):

@@ -81,13 +81,6 @@ class Detect(Node):
         if self.use_static_map:
             self._load_static_map(self.static_map_path)
 
-        # marker_qos = QoSProfile(
-        #     reliability=ReliabilityPolicy.RELIABLE,
-        #     durability=QoSDurabilityPolicy.VOLATILE,
-        #     # history=HistoryPolicy.KEEP_LAST,
-        #     depth=10
-        # )
-
         # Publishers
         self.pub_markers = self.create_publisher(MarkerArray, '/perception/markers', 10)   
         self.pub_boundaries = self.create_publisher(Marker, '/perception/boundaries', 10)
@@ -316,19 +309,16 @@ class Detect(Node):
             x_i = float(xs[i])
             y_i = float(ys[i])
 
-            # 用 converter 的 get_frenet 取出对应的 s
             s_arr, d_arr = self.converter.get_frenet(
                 np.atleast_1d(x_i), np.atleast_1d(y_i)
             )
             s_i = float(s_arr[0])
             self.get_logger().info(f"s_i: {s_i}, d_i: {d_arr[0]}")
 
-            # 在 Frenet 坐标中，取 d=0 和 d=+1.0 再 get_cartesian，连成箭头
             x0, y0 = self.converter.get_cartesian(s_i, 0.0)
-            x1, y1 = self.converter.get_cartesian(s_i, 1.0)  # +d 方向
-
+            x1, y1 = self.converter.get_cartesian(s_i, 1.0)  
             m = Marker()
-            m.header.frame_id = 'map'  # 或 "map"/"odom"
+            m.header.frame_id = 'map'
             m.header.stamp = self.get_clock().now().to_msg()
             m.ns = "frenet_normals"
             m.id = k
@@ -473,49 +463,6 @@ class Detect(Node):
             mp.points = [Point(x=float(p[0]), y=float(p[1]), z=zc) for p in pts]
             ma.markers.append(mp)
 
-            # # (2) Center point (SPHERE)
-            # mc = Marker()
-            # mc.header.frame_id = "map"
-            # mc.header.stamp = stamp
-            # mc.ns = "cluster_center"
-            # mc.id = mid_id_base + i
-            # mc.type = Marker.SPHERE
-            # mc.action = Marker.ADD
-            # mc.pose.position.x = float(center[0])
-            # mc.pose.position.y = float(center[1])
-            # mc.pose.position.z = zc + 0.02
-            # mc.pose.orientation.w = 1.0
-            # mc.scale.x = 0.12
-            # mc.scale.y = 0.12
-            # mc.scale.z = 0.12
-            # mc.color.a = 1.0
-            # mc.color.r = r
-            # mc.color.g = g
-            # mc.color.b = b
-            # mc.lifetime = DurationMsg(sec=0, nanosec=int(0.10 * 1e9))
-            # ma.markers.append(mc)
-
-            # (3) Text label: N + diag
-            # mt = Marker()
-            # mt.header.frame_id = "map"
-            # mt.header.stamp = stamp
-            # mt.ns = "cluster_text"
-            # mt.id = txt_id_base + i
-            # mt.type = Marker.TEXT_VIEW_FACING
-            # mt.action = Marker.ADD
-            # mt.pose.position.x = float(center[0])
-            # mt.pose.position.y = float(center[1])
-            # mt.pose.position.z = float(self.viz_text_z)
-            # mt.pose.orientation.w = 1.0
-            # mt.scale.z = 0.22  # text height
-            # mt.color.a = 1.0
-            # mt.color.r = 1.0
-            # mt.color.g = 1.0
-            # mt.color.b = 1.0
-            # mt.text = f"id={i}  N={npts}  diag={diag:.2f}m"
-            # mt.lifetime = DurationMsg(sec=0, nanosec=int(0.10 * 1e9))
-            # ma.markers.append(mt)
-
         self.pub_cluster_markers.publish(ma)
 
     def publish_filtered_pre_rect(self, kept_clusters_bl, rep_points_map=None):
@@ -575,32 +522,8 @@ class Detect(Node):
             m.points = [Point(x=float(p[0]), y=float(p[1]), z=z) for p in pts]
             ma.markers.append(m)
 
-        # (B) Representative points (best_map) if provided
-        # if rep_points_map is not None and len(rep_points_map) > 0:
-        #     mp = Marker()
-        #     mp.header.frame_id = "map"
-        #     mp.header.stamp = stamp
-        #     mp.ns = "filtered_rep_points"
-        #     mp.id = 41000
-        #     mp.type = Marker.SPHERE_LIST
-        #     mp.action = Marker.ADD
-        #     mp.scale.x = 0.12
-        #     mp.scale.y = 0.12
-        #     mp.scale.z = 0.12
-        #     mp.color.a = 1.0
-        #     mp.color.r = 1.0
-        #     mp.color.g = 1.0
-        #     mp.color.b = 0.0  # yellow
-        #     mp.lifetime = DurationMsg(sec=0, nanosec=int(0.10 * 1e9))
-
-        #     mp.points = [Point(x=float(x), y=float(y), z=z + 0.05) for (x, y) in rep_points_map]
-        #     ma.markers.append(mp)
-
         self.pub_filtered_markers.publish(ma)
 
-
-
-    
     def path_callback(self, msg: WaypointArray):
         """Initialize track arrays from global_centerline WaypointArray."""
 
@@ -699,10 +622,6 @@ class Detect(Node):
         )
         if self.use_static_map:
             self.publish_static_walls()
-
-        # self.debug_frenet_consistency(xs, ys)
-        # self.debug_s_axis(xs, ys, ss_raw)
-        # self.publish_frenet_normals(xs, ys)
 
     def _load_static_map(self, path: str):
         """Load precomputed static walls (s_axis, d_left, d_right) from npz."""
@@ -954,29 +873,6 @@ class Detect(Node):
             center = corner1 + 0.5*colVec + 0.5*orthVec
 
             current_obstacle_array.append(Obstacle(center[0], center[1], np.linalg.norm(colVec), theta_opt))
-            # # center position: 只用可见边的中点，不再加 orthVec
-            # center_edge = corner1 + 0.5 * colVec
-
-            # # 可选：沿着“从车指向障碍”的方向稍微外推一点，近似真实车中心
-            # # 这里假设激光在 ego_racecar/base_link 原点，cluster 是“近边”
-            # vec_to_edge = center_edge
-            # dist_edge = np.linalg.norm(vec_to_edge)
-            # if dist_edge > 1e-6:
-            #     dir_radial = vec_to_edge / dist_edge
-            # else:
-            #     dir_radial = np.array([1.0, 0.0])  # fallback
-
-            # half_width = 0.25  # 对方车“半宽”（m），可以按实际车宽调
-            # center = center_edge + half_width * dir_radial
-
-            # # 大小：用可见边长度作为 size，并且做个夹紧，防止异常跳变
-            # raw_size = np.linalg.norm(colVec)
-            # size = float(np.clip(raw_size, 0.3, 0.5))  # 下限/上限可按比赛车尺寸调
-
-            # current_obstacle_array.append(
-            #     Obstacle(center[0], center[1], size, theta_opt)
-            # )
-
 
         return current_obstacle_array
     
@@ -1048,24 +944,9 @@ class Detect(Node):
             m.lifetime = DurationMsg(sec=0, nanosec=int(0.05 * 1e9))
 
             arr.markers.append(m)
-        #     new_ids.add(i)
 
-        # vanished_ids = self.prev_ids - new_ids
-        # self.get_logger().info(f"Vanished IDs: {vanished_ids}")
-        # for vid in vanished_ids:
-        #     m = Marker()
-        #     m.header.frame_id = "map"
-        #     m.header.stamp = self.current_stamp
-        #     m.ns = "obstacles"
-        #     m.id = vid
-        #     m.action = Marker.DELETE
-            # arr.markers.append(m)
-
-        # self.prev_ids = new_ids
         self.pub_markers.publish(self.clearmarkers()) 
         self.pub_markers.publish(arr)
-
-        # Obstacle.current_id = 0
 
     def publish_obstacles(self, xy, sd):
         arr = MarkerArray()
@@ -1089,23 +970,6 @@ class Detect(Node):
             m.pose.position.y = float(y)
             m.pose.orientation.w = 1.0
             m.lifetime = DurationMsg(sec=0, nanosec=int(0.05 * 1e9))
-            arr.markers.append(m)
-            # new_ids.add(i)
-
-        # vanished_ids = self.prev_ids_obs - new_ids
-        # self.get_logger().info(f"Vanished IDs (mid): {vanished_ids}")
-        # for vid in vanished_ids:
-        #     m = Marker()
-        #     m.header.frame_id = "map"
-        #     m.header.stamp = stamp
-        #     m.ns = "obstacles_mid"
-        #     m.id = vid
-        #     m.action = Marker.DELETE
-        #     arr.markers.append(m)
-
-        # self.prev_ids_obs = new_ids
-        # self.pub_breakpoints_markers.publish(self.clearmarkers())
-        # self.pub_breakpoints_markers.publish(arr)
 
     def publish_track_boundaries(self):
         if self.car_s is None: 
@@ -1184,7 +1048,7 @@ class Detect(Node):
         left_marker.id = 20001
         left_marker.type = Marker.LINE_STRIP
         left_marker.action = Marker.ADD
-        left_marker.scale.x = 0.05      # 线宽
+        left_marker.scale.x = 0.05     
         left_marker.color.a = 1.0
         left_marker.color.r = 0.1
         left_marker.color.g = 0.9
@@ -1307,7 +1171,6 @@ class Detect(Node):
             s_c = s_c.astype(np.float64)
             d_c = d_c.astype(np.float64)
 
-            # idx_best = int(np.argmax(np.abs(d_c)))
             idx_best = int(np.argmin(np.abs(d_c)))
             s_best = float(s_c[idx_best])
             d_best = float(d_c[idx_best])
@@ -1328,12 +1191,6 @@ class Detect(Node):
                 if self.is_track_boundary(s_best, d_best):
                     filtered_as_wall = True
                 # pass
-                
-            # self.debug_cls_s.append(s_best)
-            # self.debug_cls_d.append(d_best)
-            # self.debug_cls_kept.append(0 if filtered_as_wall else 1)
-            # self.debug_cls_x.append(float(best_map[0]))
-            # self.debug_cls_y.append(float(best_map[1]))
 
             if not filtered_as_wall:
                 self.debug_cls_s.append(s_best)
@@ -1387,19 +1244,10 @@ class Detect(Node):
                 continue
 
             kept_clusters_bl.append(c)
-
-            # 这里用于可视化 / debug：
-            # 你可以选择用 best_map / (s_best, d_best)，
-            # 也可以继续用几何中心 / mid 点，这里我用 best 的，更一致。
-            # mids_map.append((best_map[0], best_map[1]))
-            # mids_sd.append((s_best, d_best))
-
-            # 如果你更希望继续用“簇的中点”作为可视化位置，可以换成：
             mid_bl = c[c.shape[0] // 2]
             mid_map = self._transform_xy(mid_bl.reshape(1, 2), H_map_bl)[0]
             mids_map.append((mid_map[0], mid_map[1]))
-            mids_sd.append((s_best, d_best))  # s,d 仍然用 best 的
-
+            mids_sd.append((s_best, d_best))  
         # --- Publish filtered (pre-rect) result ---
         if self.viz_filtered_clusters:
             # ensure self.H_map_bl points to the H_map_bl used this frame
@@ -1434,7 +1282,6 @@ class Detect(Node):
 
     def save_obstacle_debug(self, path_name: str = "obstacles_debug.npz"):
         """Save logged obstacle positions (x,y,s,d) and track to an npz file."""
-        # 拼成一维数组：每帧一个小数组 -> concat
         if self.debug_obs_x:
             obs_x = np.concatenate(self.debug_obs_x)
             obs_y = np.concatenate(self.debug_obs_y)
@@ -1446,7 +1293,6 @@ class Detect(Node):
             obs_s = np.array([], dtype=np.float64)
             obs_d = np.array([], dtype=np.float64)
 
-        # 轨道中心线（如果已知）
         if self.waypoints is not None:
             track_x = self.waypoints[:, 0].astype(np.float64)
             track_y = self.waypoints[:, 1].astype(np.float64)
