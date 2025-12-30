@@ -27,6 +27,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'tf_bridge_map_odom = roboracer_utils.tf_bridge_map_odom:main',
             'frenet_odom_republisher = roboracer_utils.frenet_odom_republisher:main',
         ],
     },

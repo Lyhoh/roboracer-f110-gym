@@ -125,7 +125,7 @@ class DualPurePursuitNode(Node):
        Ego can override its path with a local planner OT path.
     """
     def __init__(self):
-        super().__init__('dual_pure_pursuit')
+        super().__init__('pp_overtake')
 
         # Topics
         self.odom_topic_ego = self.declare_parameter('odom_topic_ego', '/ego_racecar/odom').get_parameter_value().string_value
@@ -139,8 +139,8 @@ class DualPurePursuitNode(Node):
         self.ot_topic = self.declare_parameter('ot_topic', '/planner/avoidance/otwpnts').get_parameter_value().string_value
 
         # Lateral offsets (meters): + is left of tangent
-        self.lat_offset_ego = float(self.declare_parameter('lateral_offset_ego',  0.0).value)  # 0.4
-        self.lat_offset_opp = float(self.declare_parameter('lateral_offset_opp', -0.0).value) # -0.4
+        self.lat_offset_ego = float(self.declare_parameter('lateral_offset_ego',  0.0).value) 
+        self.lat_offset_opp = float(self.declare_parameter('lateral_offset_opp', -0.0).value) 
         
         self.declare_parameter('ot_empty_fallback_count', 5) 
         self.ot_empty_count = 0
@@ -366,6 +366,7 @@ class DualPurePursuitNode(Node):
     def on_timer(self):
         # if not (self.per_ready and self.lp_ready and self.track_ready):
         if not (self.per_ready and self.track_ready):
+            # self.get_logger().info("[DualPP] Waiting for perception, local planner, and track readiness...")
             return
         
         now_ns = self.get_clock().now().nanoseconds

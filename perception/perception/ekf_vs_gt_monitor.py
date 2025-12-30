@@ -1,14 +1,3 @@
-"""
-EKF vs GT online monitor (using your FrenetConverter).
-Subscribes:
-  - /global_centerline (for converter)
-  - /opp_racecar/odom  (GT in world frame)
-  - /perception/obstacles (EKF estimate in Frenet)
-Publishes:
-  - /monitor/err_cart : Float32MultiArray [ex, ey, dist]
-  - /monitor/err_fren : Float32MultiArray [e_s, e_vs, e_d, e_vd]
-"""
-
 from __future__ import annotations
 import math
 from collections import deque

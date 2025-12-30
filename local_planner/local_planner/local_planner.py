@@ -14,7 +14,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 from roboracer_utils.frenet_converter import FrenetConverter
 
 
-class SimpleSQPAvoidanceNode(Node):
+class SimpleFrenetAvoidanceNode(Node):
     """
     A simplified local avoidance planner for ROS2 + f1tenth_gym.
 
@@ -27,7 +27,7 @@ class SimpleSQPAvoidanceNode(Node):
     """
 
     def __init__(self):
-        super().__init__('simple_sqp_avoidance_node')
+        super().__init__('simple_frenet_avoidance_node')
 
         # --- Parameters ---
         self.declare_parameter('lookahead', 15.0)
@@ -99,12 +99,12 @@ class SimpleSQPAvoidanceNode(Node):
             self.global_wp_cb,
             qos
         )
-
+        # Currently we reuse centerline as raceline for robustness.
         self.create_subscription(
             WaypointArray,
             '/global_centerline', 
             self.raceline_wp_cb,
-            10
+            qos
         )
 
         self.create_subscription(
@@ -139,7 +139,7 @@ class SimpleSQPAvoidanceNode(Node):
         # Timer loop
         self.timer = self.create_timer(0.05, self.timer_callback)  # 20 Hz
 
-        self.get_logger().info("[SimpleSQP] Node initialized.")
+        self.get_logger().info("[SimpleFrenet] Node initialized.")
 
     # -------------------- Callbacks -------------------- #
 
@@ -157,7 +157,7 @@ class SimpleSQPAvoidanceNode(Node):
         # Initialize Frenet converter once
         if self.converter is None:
             self.converter = FrenetConverter(xy[:, 0], xy[:, 1])
-            self.get_logger().info("[SimpleSQP] FrenetConverter initialized.")
+            self.get_logger().info("[SimpleFrenet] FrenetConverter initialized.")
 
     def raceline_wp_cb(self, msg: WaypointArray):
         """Callback for global raceline waypoints (in centerline Frenet frame)."""
@@ -183,7 +183,7 @@ class SimpleSQPAvoidanceNode(Node):
         self.path_needs_update = False
         self.pub_ready.publish(Ready(ready=True))
 
-        self.get_logger().info("[SimpleSQP] Raceline waypoints received.")
+        self.get_logger().info("[SimpleFrenet] Raceline waypoints received.")
 
     def obstacles_cb(self, msg: ObstacleArray):
         """Callback for perception obstacles."""
@@ -571,7 +571,7 @@ class SimpleSQPAvoidanceNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = SimpleSQPAvoidanceNode()
+    node = SimpleFrenetAvoidanceNode()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

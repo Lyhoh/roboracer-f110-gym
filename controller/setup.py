@@ -23,7 +23,6 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'pure_pursuit = controller.pure_pursuit_node:main',
             'pp_overtake = controller.pp_overtake:main',
         ],
     },

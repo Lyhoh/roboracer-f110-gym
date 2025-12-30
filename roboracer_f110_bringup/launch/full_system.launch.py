@@ -41,8 +41,9 @@ def generate_launch_description():
             PathJoinSubstitution([FindPackageShare('perception'), 'launch', 'perception.launch.py']),
         ),
 
-        # IncludeLaunchDescription(PathJoinSubstitution([FindPackageShare('controller'), 'launch', 'pure_pursuit.launch.py']),
-        # ),
+        IncludeLaunchDescription(
+            PathJoinSubstitution([FindPackageShare('controller'), 'launch', 'pure_pursuit.launch.py']),
+        ),
 
         # IncludeLaunchDescription(
         #     PathJoinSubstitution([FindPackageShare('local_planner'), 'launch', 'local_planner.launch.py']),

@@ -8,18 +8,15 @@
     drive_topic_ego: /drive
     drive_topic_opp: /opp_drive
 
-    # --- Paths (same base path for both cars) ---
-    use_same_path: true
-
     # --- Vehicle & controller base params ---
     wheelbase: 0.33
     steer_limit_deg: 24.0
     publish_rate: 40.0
-    steering_rate_limit: 3.0   # rad/s
+    steering_rate_limit: 3.0   
 
     # --- Lateral offsets (meters): + = left of path tangent, - = right ---
-    lateral_offset_ego: -0.5   #0.40  -0.5
-    lateral_offset_opp: 0.5   #-0.40  0.5
+    lateral_offset_ego: -0.5  
+    lateral_offset_opp: 0.5   
 
     # --- Lookahead tuning ---
     ld_min_ego: 0.6
@@ -27,7 +24,7 @@
     ld_min_opp: 0.6
     ld_k_opp:   0.3
 
-    # --- Speed policy (Ego faster than Opp) ---
+    # --- Speed policy ---
     # Option A: use vx_mps from the path with scaling and a max cap
     use_path_speed_ego: false  # true
     speed_scale_ego:    1.10   # Ego runs 10% faster than path vx
@@ -40,8 +37,8 @@
     v_ramp_rate_opp:    2.0
 
     # Option B: constant targets if not using path vx (set use_path_speed_* = false)
-    v_target_ego: 2.0  # 3.5, 2.0, 1.0, 2.5, 2.0 3.0
-    v_target_opp: 2.0  # 3.0, 2.0, 1.0, 0.5, 2.5 1.0
+    v_target_ego: 2.0 
+    v_target_opp: 2.0 
 
     # Overtake mode: follow local planner speed
     ot_use_path_speed_ego: true
