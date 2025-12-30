@@ -96,29 +96,37 @@ Detailed launch parameters and configuration notes are documented in `roboracer_
 
 ## Packages
 
-- **`perception/`**    [README](perception/README.md)
-  Opponent detection and tracking (main project focus).  
+- **`perception/`**    
+  Opponent detection and tracking (main project focus).
+  [README](perception/README.md)
 
-- **`global_planner/`**    [README](global_planner/README.md)
-  Publishes pre-defined centerline / raceline waypoints from CSV.  
+- **`global_planner/`**    
+  Publishes pre-defined centerline / raceline waypoints from CSV.
+  [README](global_planner/README.md)
 
-- **`local_planner/`**    [README](local_planner/README.md)
-  Frenet-based local avoidance planner producing overtaking waypoints.  
+- **`local_planner/`**    
+  Frenet-based local avoidance planner producing overtaking waypoints.
+  [README](local_planner/README.md)
 
-- **`controller/`**    [README](controller/README.md)
-  Pure Pursuit controller with optional overtaking path switching.  
+- **`controller/`**   
+  Pure Pursuit controller with optional overtaking path switching.
+   [README](controller/README.md)
 
-- **`localization/`**    [README](localization/README.md)
-  Offline static wall map generation for optional perception filtering.  
+- **`localization/`**    
+  Offline static wall map generation for optional perception filtering.
+  [README](localization/README.md)
 
-- **`roboracer_interfaces/`**    [README](roboracer_interfaces/README.md)
-  Custom ROS 2 message definitions.  
+- **`roboracer_interfaces/`**  
+  Custom ROS 2 message definitions.
+  [README](roboracer_interfaces/README.md)
 
-- **`roboracer_utils/`**    [README](roboracer_utils/README.md)
-  Shared utilities.  
+- **`roboracer_utils/`**    
+  Shared utilities.
+  [README](roboracer_utils/README.md)
 
-- **`roboracer_f110_bringup/`**    [README](roboracer_f110_bringup/README.md)
-  Launch files and global configuration to run the system.  
+- **`roboracer_f110_bringup/`**   
+  Launch files and global configuration to run the system.
+   [README](roboracer_f110_bringup/README.md)
 
 ## Notes / Limitations
 
